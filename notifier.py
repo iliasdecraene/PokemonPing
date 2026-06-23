@@ -125,6 +125,44 @@ def load_recipients() -> list[dict]:
     return recipients
 
 
+def load_telegram() -> dict | None:
+    """
+    Telegram config:
+        TELEGRAM_BOT_TOKEN  - the token from @BotFather
+        TELEGRAM_CHAT_IDS   - who to message: a JSON array OR a comma-separated
+                              list of chat ids. A personal chat id is a positive
+                              number; a group/channel id is negative.
+    Returns None if not configured.
+    """
+    def _val(key):
+        v = os.environ.get(key)
+        if not v:
+            local = _local_json("config.local.json")
+            if isinstance(local, dict):
+                v = local.get(key)
+        return v
+
+    token = _val("TELEGRAM_BOT_TOKEN")
+    raw_ids = _val("TELEGRAM_CHAT_IDS")
+    if not token or not raw_ids:
+        return None
+
+    ids: list = []
+    if isinstance(raw_ids, list):
+        ids = raw_ids
+    else:
+        raw_ids = str(raw_ids).strip()
+        try:
+            parsed = json.loads(raw_ids)
+            ids = parsed if isinstance(parsed, list) else [parsed]
+        except json.JSONDecodeError:
+            ids = [part for part in raw_ids.split(",")]
+    chat_ids = [str(i).strip() for i in ids if str(i).strip()]
+    if not chat_ids:
+        return None
+    return {"token": str(token), "chat_ids": chat_ids}
+
+
 # --------------------------------------------------------------------------- #
 # Normalized item shape
 # --------------------------------------------------------------------------- #
@@ -371,12 +409,40 @@ def send_via_callmebot(recipient: dict, text: str) -> bool:
         return False
 
 
-def notify_all(recipients: list[dict], messages: list[str]) -> None:
+# --------------------------------------------------------------------------- #
+# Telegram
+# --------------------------------------------------------------------------- #
+
+TELEGRAM_DELAY_SECONDS = 1  # Telegram is fast; a small gap avoids 429s.
+
+
+def send_via_telegram(token: str, chat_id: str, text: str) -> bool:
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        resp = requests.post(
+            url, data={"chat_id": chat_id, "text": text}, timeout=30
+        )
+        # Never let the bot token leak into public logs.
+        body = str(resp.text)[:300].replace(token, "***")
+        ok = resp.status_code == 200
+        verdict = "sent OK" if ok else "FAILED"
+        print(f"  -> telegram {chat_id}: HTTP {resp.status_code} [{verdict}] {body}")
+        return ok
+    except requests.RequestException as e:
+        print(f"  -> telegram ERROR for {chat_id}: {str(e).replace(token, '***')}")
+        return False
+
+
+def notify_all(messages: list[str], recipients: list[dict], telegram: dict | None) -> None:
     for msg in messages:
         print(f"ALERT:\n{msg}\n")
         for r in recipients:
             send_via_callmebot(r, msg)
             time.sleep(SEND_DELAY_SECONDS)
+        if telegram:
+            for chat_id in telegram["chat_ids"]:
+                send_via_telegram(telegram["token"], chat_id, msg)
+                time.sleep(TELEGRAM_DELAY_SECONDS)
 
 
 # --------------------------------------------------------------------------- #
@@ -386,8 +452,17 @@ def notify_all(recipients: list[dict], messages: list[str]) -> None:
 def main() -> int:
     sites = load_sites()
     recipients = load_recipients()
-    if not recipients:
-        print("WARNING: no recipients configured (CALLMEBOT_RECIPIENTS). "
+    telegram = load_telegram()
+    channels = []
+    if recipients:
+        channels.append(f"CallMeBot×{len(recipients)}")
+    if telegram:
+        channels.append(f"Telegram×{len(telegram['chat_ids'])}")
+    if channels:
+        print(f"Channels: {', '.join(channels)}")
+    else:
+        print("WARNING: no delivery channels configured "
+              "(CALLMEBOT_RECIPIENTS / TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_IDS). "
               "Will detect changes but not send anything.")
 
     session = requests.Session()
@@ -416,7 +491,7 @@ def main() -> int:
     alerts = build_alerts(prev, curr)
     print(f"{len(alerts)} alert(s) to send.")
     if alerts:
-        notify_all(recipients, alerts)
+        notify_all(alerts, recipients, telegram)
 
     # Carry forward items from sites that errored this run, so a transient
     # failure doesn't make everything look "new" next time. We only replace the

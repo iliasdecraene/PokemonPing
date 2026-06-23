@@ -1,3 +1,5 @@
 {
-  "CALLMEBOT_RECIPIENTS": "[{\"name\": \"Me\", \"phone\": \"+41791234567\", \"apikey\": \"123456\"}, {\"name\": \"Alex\", \"phone\": \"+41799999999\", \"apikey\": \"789012\"}]"
+  "TELEGRAM_BOT_TOKEN": "123456789:AAExampleBotTokenFromBotFather",
+  "TELEGRAM_CHAT_IDS": "123456789",
+  "CALLMEBOT_RECIPIENTS": "[{\"name\": \"Me\", \"phone\": \"+41791234567\", \"apikey\": \"123456\"}]"
 }

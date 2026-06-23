@@ -1,10 +1,14 @@
 # Pokémon Drop Notifier 🔔
 
-Watches one or more card shops and sends a **WhatsApp message via CallMeBot** the
-moment a Pokémon product:
+Watches one or more card shops and sends you a **Telegram** (and/or WhatsApp via
+CallMeBot) message the moment a Pokémon product:
 
 - **comes back in stock** (out-of-stock → in-stock), or
 - **appears as a brand-new listing**.
+
+Delivery channels (configure either or both — alerts go to all configured):
+- **Telegram** — reliable, free, recommended.
+- **CallMeBot** (WhatsApp) — free but third-party and sometimes flaky delivery.
 
 Runs entirely on **GitHub Actions' free tier** — no server, no NAS, no paid
 services. State lives in the Actions cache, so it only ever alerts on *changes*.
@@ -28,7 +32,7 @@ GitHub Actions cron (every ~5 min)
         │          → normalize to {name, in_stock, price, link}
         │          → diff against last run (state.json, from Actions cache)
         ▼
-  CallMeBot  ──► WhatsApp message to each opted-in recipient
+  Telegram / CallMeBot  ──► message to each configured chat / recipient
 ```
 
 Each shop is handled by an **adapter** chosen by the site's `type`:
@@ -50,20 +54,30 @@ Adding a shop that uses an **existing** adapter is pure config — no code.
 
 ## Setup
 
-### 1. Each person opts in to CallMeBot (one-time, ~30 seconds)
+### 1. Set up Telegram (recommended, ~2 minutes)
 
-CallMeBot can only message people who have **personally allowed it** (no group
-support), so every recipient does this once:
+1. In Telegram, message **[@BotFather](https://t.me/BotFather)** → `/newbot` →
+   follow the prompts → it gives you a **bot token** like
+   `123456789:AAE...`.
+2. **Open a chat with your new bot and send it any message** (e.g. `hi`).
+   *This step is required* — a bot cannot message you until you've messaged it
+   first.
+3. Get your **chat id**: message **[@userinfobot](https://t.me/userinfobot)** and
+   it replies with your numeric id (e.g. `123456789`). That's your
+   `TELEGRAM_CHAT_IDS`.
 
-1. Save **+34 644 51 95 23** as a WhatsApp contact (e.g. "CallMeBot").
-2. WhatsApp it this exact message: `I allow callmebot to send me messages`
-3. It replies with a personal **API key** (e.g. `Your APIKEY is 123456`).
-4. Note that person's **phone (with country code)** + their **API key**.
+> To send to a **group** later: add your bot to the group, then use the group's
+> chat id (a negative number). For just yourself, the personal id above is fine.
 
-> If that number stops responding, check the current activation number at
-> <https://www.callmebot.com/blog/free-api-whatsapp-messages/>.
+### 2. (Optional) CallMeBot WhatsApp
 
-### 2. Push to GitHub
+Skip unless you also want WhatsApp. Each recipient does this once: save
+**+34 644 51 95 23** as a contact, WhatsApp it `I allow callmebot to send me
+messages`, and note the **API key** it replies with + their **phone**. (Current
+activation number: <https://www.callmebot.com/blog/free-api-whatsapp-messages/>.
+CallMeBot delivery can be unreliable — Telegram is the dependable channel.)
+
+### 3. Push to GitHub
 
 ```bash
 git init
@@ -74,18 +88,16 @@ git remote add origin https://github.com/<you>/pokemon-drop-notifier.git
 git push -u origin main
 ```
 
-### 3. Add the recipients secret
+### 4. Add your secrets
 
 Repo → **Settings → Secrets and variables → Actions → New repository secret**
 
-- **Name:** `CALLMEBOT_RECIPIENTS`
-- **Value:** JSON array of everyone who opted in:
-  ```json
-  [{"name": "Me", "phone": "+41791234567", "apikey": "123456"},
-   {"name": "Alex", "phone": "+41799999999", "apikey": "789012"}]
-  ```
+- `TELEGRAM_BOT_TOKEN` → the token from BotFather
+- `TELEGRAM_CHAT_IDS` → your chat id (or several, comma-separated: `111,222`)
+- *(optional)* `CALLMEBOT_RECIPIENTS` → JSON array:
+  `[{"name": "Me", "phone": "+41791234567", "apikey": "123456"}]`
 
-### 4. Turn it on
+### 5. Turn it on
 
 - **Actions** tab → enable workflows → open **Pokemon Drop Notifier** → **Run workflow**.
 - The **first run seeds state silently** (no spam for everything already listed).

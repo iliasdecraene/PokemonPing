@@ -37,6 +37,10 @@ jobs:
 
       - name: Run notifier
         env:
+          # Telegram (reliable, free). Set both as repo secrets.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          # CallMeBot (WhatsApp). Optional — leave unset if you only use Telegram.
           CALLMEBOT_RECIPIENTS: ${{ secrets.CALLMEBOT_RECIPIENTS }}
           # Optional: override the watched shops without editing notifier.py.
           # Set a repo VARIABLE named SITES to a JSON array (see sites.local.json.example).
