@@ -1,0 +1,13 @@
+# Local state + secrets — never commit these
+state.json
+config.local.json
+sites.local.json
+
+# Editor / tooling
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

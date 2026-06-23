@@ -1,0 +1,19 @@
+[
+  {
+    "id": "cardcollectors",
+    "type": "woocommerce",
+    "label": "CardCollectors",
+    "api_url": "https://cardcollectors.ch/wp-json/wc/store/v1/products?brand=3038&orderby=date&order=desc",
+    "brand_id": "3038",
+    "name_filter": "(EN)"
+  },
+  {
+    "id": "wog",
+    "type": "wog",
+    "label": "WOG.ch",
+    "search_term": "Pokemon",
+    "platform_name": "Trading Cards",
+    "name_filter": "-EN-",
+    "max_pages": 5
+  }
+]

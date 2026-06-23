@@ -1,0 +1,174 @@
+# Pokémon Drop Notifier 🔔
+
+Watches one or more card shops and sends a **WhatsApp message via CallMeBot** the
+moment a Pokémon product:
+
+- **comes back in stock** (out-of-stock → in-stock), or
+- **appears as a brand-new listing**.
+
+Runs entirely on **GitHub Actions' free tier** — no server, no NAS, no paid
+services. State lives in the Actions cache, so it only ever alerts on *changes*.
+
+**Shops watched out of the box:**
+
+| Shop | What's matched | How |
+|------|----------------|-----|
+| [cardcollectors.ch](https://cardcollectors.ch) | Pokémon products with `(EN)` in the title | WooCommerce Store API (clean JSON) |
+| [wog.ch](https://www.wog.ch) | Pokémon **Trading Cards** with `-EN-` in the title | wog's `ajax.search` JSON endpoint |
+
+---
+
+## How it works
+
+```
+GitHub Actions cron (every ~5 min)
+        │
+        ▼
+  notifier.py ──► for each configured shop, an "adapter" fetches products
+        │          → normalize to {name, in_stock, price, link}
+        │          → diff against last run (state.json, from Actions cache)
+        ▼
+  CallMeBot  ──► WhatsApp message to each opted-in recipient
+```
+
+Each shop is handled by an **adapter** chosen by the site's `type`:
+
+- **`woocommerce`** — polls a WooCommerce shop's Store API
+  (`/wp-json/wc/store/v1/products`). Reliable structured JSON with
+  `is_in_stock`, `prices`, `permalink`. Filtered by a brand id + a title
+  substring.
+- **`wog`** — posts to wog.ch's internal `ajax.search` endpoint (which returns
+  JSON), keeps only the `Trading Cards` platform, and filters by a title
+  substring. (wog's site is JavaScript-rendered, but this is the same endpoint
+  its own search box calls.)
+
+Adding a shop that uses an **existing** adapter is pure config — no code.
+
+---
+
+## Setup
+
+### 1. Each person opts in to CallMeBot (one-time, ~30 seconds)
+
+CallMeBot can only message people who have **personally allowed it** (no group
+support), so every recipient does this once:
+
+1. Save **+34 644 51 95 23** as a WhatsApp contact (e.g. "CallMeBot").
+2. WhatsApp it this exact message: `I allow callmebot to send me messages`
+3. It replies with a personal **API key** (e.g. `Your APIKEY is 123456`).
+4. Note that person's **phone (with country code)** + their **API key**.
+
+> If that number stops responding, check the current activation number at
+> <https://www.callmebot.com/blog/free-api-whatsapp-messages/>.
+
+### 2. Push to GitHub
+
+```bash
+git init
+git add .
+git commit -m "Pokemon drop notifier"
+git branch -M main
+git remote add origin https://github.com/<you>/pokemon-drop-notifier.git
+git push -u origin main
+```
+
+### 3. Add the recipients secret
+
+Repo → **Settings → Secrets and variables → Actions → New repository secret**
+
+- **Name:** `CALLMEBOT_RECIPIENTS`
+- **Value:** JSON array of everyone who opted in:
+  ```json
+  [{"name": "Me", "phone": "+41791234567", "apikey": "123456"},
+   {"name": "Alex", "phone": "+41799999999", "apikey": "789012"}]
+  ```
+
+### 4. Turn it on
+
+- **Actions** tab → enable workflows → open **Pokemon Drop Notifier** → **Run workflow**.
+- The **first run seeds state silently** (no spam for everything already listed).
+  After that you only get alerts for *changes*.
+
+Done. 🎉
+
+---
+
+## Configuring which shops to watch
+
+The default shops are defined in `notifier.py` (`DEFAULT_SITES`). To change them
+without editing code, set a repo **variable** named `SITES` (Settings → Secrets
+and variables → Actions → *Variables*) to a JSON array — see
+[`sites.local.json.example`](sites.local.json.example). Each entry:
+
+**WooCommerce shop:**
+```json
+{
+  "id": "cardcollectors",
+  "type": "woocommerce",
+  "label": "CardCollectors",
+  "api_url": "https://SHOP/wp-json/wc/store/v1/products?brand=3038&orderby=date&order=desc",
+  "brand_id": "3038",
+  "name_filter": "(EN)"
+}
+```
+- Find a brand id: open `https://SHOP/wp-json/wc/store/v1/products/brands?per_page=100`
+  and read the `id` for the brand you want. (Or use `category=<id>` in `api_url`
+  and look at `…/products/categories`.)
+
+**wog.ch:**
+```json
+{
+  "id": "wog",
+  "type": "wog",
+  "label": "WOG.ch",
+  "search_term": "Pokemon",
+  "platform_name": "Trading Cards",
+  "name_filter": "-EN-",
+  "max_pages": 5
+}
+```
+
+`id` must be unique per shop (it namespaces the saved state). `label` is what
+shows up in the WhatsApp message.
+
+---
+
+## Testing locally (optional)
+
+```bash
+pip install -r requirements.txt
+cp config.local.json.example config.local.json   # add your recipients
+# optional: cp sites.local.json.example sites.local.json  # to tweak shops
+python notifier.py
+```
+
+First local run seeds `state.json`; later runs alert on changes. `state.json`,
+`config.local.json` and `sites.local.json` are git-ignored.
+
+---
+
+## Notes, limits & honest expectations
+
+- **wog.ch reality:** at the time of writing, wog has **no in-stock English
+  (`-EN-`) Pokémon sealed products** — the `-EN-` items it lists are "no longer
+  available", and what's in stock is mostly accessories/`-DE-`. That's fine:
+  the notifier is exactly what tells you when one of them **restocks** or a
+  **new `-EN-` product appears**. The `-EN-` filter is correct; the inventory
+  just moves.
+- **wog.ch search depth:** wog's search is reliable on the first pages (real
+  Pokémon hits) but pads with loosely-related items deeper, so the adapter caps
+  at `max_pages` (default 5). That covers new + restocking English Pokémon
+  without hammering their server.
+- **Speed:** GitHub's scheduled jobs are throttled and often run **5–15 min
+  late**. Great for restocks / new listings; **not** fast enough to win drops
+  that sell out in seconds (that needs sub-minute polling + auto-checkout).
+- **Near-real-time upgrade:** to poll every ~60s, turn `main()` into a loop
+  (poll → sleep 60s → repeat) up to the 6-hour job limit, with the cron just
+  restarting it. Ask and I'll wire it up.
+- **Resilience:** if one shop's request fails, the run logs it and continues
+  with the others; that shop's previous state is preserved (no false "new"
+  alerts next run).
+- **CallMeBot** is a free third-party relay (it only messages people who opted
+  in). Messages are spaced out to respect its rate limits.
+- **Be polite to the shops:** the default ~5-min cadence is light. Don't crank
+  the cron to every few seconds.

@@ -1,0 +1,3 @@
+{
+  "CALLMEBOT_RECIPIENTS": "[{\"name\": \"Me\", \"phone\": \"+41791234567\", \"apikey\": \"123456\"}, {\"name\": \"Alex\", \"phone\": \"+41799999999\", \"apikey\": \"789012\"}]"
+}

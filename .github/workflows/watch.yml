@@ -1,0 +1,45 @@
+name: Pokemon Drop Notifier
+
+on:
+  schedule:
+    # Every 5 minutes. GitHub throttles scheduled jobs under load, so real
+    # cadence is often 5-15 min. Good enough for restocks / new listings.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # lets you run it manually from the Actions tab
+
+# Never let two runs overlap (they'd fight over the shared state).
+concurrency:
+  group: pokemon-drop-notifier
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Restore the previous run's state.json. The key includes run_id so every
+      # run writes a fresh cache entry; restore-keys grabs the most recent one.
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: notifier-state-${{ github.run_id }}
+          restore-keys: |
+            notifier-state-
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run notifier
+        env:
+          CALLMEBOT_RECIPIENTS: ${{ secrets.CALLMEBOT_RECIPIENTS }}
+          # Optional: override the watched shops without editing notifier.py.
+          # Set a repo VARIABLE named SITES to a JSON array (see sites.local.json.example).
+          # Leave unset to use the built-in defaults (CardCollectors + WOG.ch).
+          SITES: ${{ vars.SITES }}
+        run: python notifier.py
