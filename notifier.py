@@ -359,12 +359,13 @@ def send_via_callmebot(recipient: dict, text: str) -> bool:
         resp = requests.get(
             "https://api.callmebot.com/whatsapp.php", params=params, timeout=30
         )
-        if resp.status_code == 200:
-            print(f"  -> sent to {who}")
-            return True
-        body = _redact(resp.text[:200], recipient)
-        print(f"  -> FAILED for {who}: HTTP {resp.status_code}: {body}")
-        return False
+        # CallMeBot returns HTTP 200 even on errors — the real outcome is in the
+        # body (e.g. "Message queued..." vs "APIKEY not valid"). Always log it.
+        body = _redact(" ".join(resp.text.split())[:300], recipient)
+        ok = resp.status_code == 200 and "queued" in resp.text.lower()
+        verdict = "queued OK" if ok else "NOT delivered"
+        print(f"  -> {who}: HTTP {resp.status_code} [{verdict}] CallMeBot: {body}")
+        return ok
     except requests.RequestException as e:
         print(f"  -> ERROR sending to {who}: {_redact(str(e), recipient)}")
         return False
