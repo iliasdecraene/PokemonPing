@@ -305,23 +305,46 @@ def render_message(headline: str, item: dict) -> str:
 # CallMeBot
 # --------------------------------------------------------------------------- #
 
+def _mask_phone(phone: str) -> str:
+    """Show only the last 4 digits, e.g. +417xxxxx4567 -> '…4567'."""
+    p = str(phone)
+    return "…" + p[-4:] if len(p) > 4 else "…"
+
+
+def _redact(text: str, recipient: dict) -> str:
+    """Strip the phone + apikey (raw and URL-encoded) from any string we log.
+
+    Critical for PUBLIC repos: Actions logs are world-readable, and a network
+    error from requests includes the full failing URL (phone + apikey in the
+    query string). GitHub's secret masking can't be relied on for values parsed
+    out of a JSON secret, so we redact them ourselves.
+    """
+    out = str(text)
+    for v in (str(recipient.get("phone", "")), str(recipient.get("apikey", ""))):
+        if v:
+            out = out.replace(v, "***").replace(urllib.parse.quote(v), "***")
+    return out
+
+
 def send_via_callmebot(recipient: dict, text: str) -> bool:
-    url = (
-        "https://api.callmebot.com/whatsapp.php"
-        f"?phone={urllib.parse.quote(str(recipient['phone']))}"
-        f"&text={urllib.parse.quote(text)}"
-        f"&apikey={urllib.parse.quote(str(recipient['apikey']))}"
-    )
-    who = recipient.get("name", recipient["phone"])
+    who = recipient.get("name") or _mask_phone(recipient.get("phone", ""))
+    params = {
+        "phone": str(recipient["phone"]),
+        "text": text,
+        "apikey": str(recipient["apikey"]),
+    }
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(
+            "https://api.callmebot.com/whatsapp.php", params=params, timeout=30
+        )
         if resp.status_code == 200:
             print(f"  -> sent to {who}")
             return True
-        print(f"  -> FAILED for {who}: HTTP {resp.status_code}: {resp.text[:200]}")
+        body = _redact(resp.text[:200], recipient)
+        print(f"  -> FAILED for {who}: HTTP {resp.status_code}: {body}")
         return False
     except requests.RequestException as e:
-        print(f"  -> ERROR sending to {who}: {e}")
+        print(f"  -> ERROR sending to {who}: {_redact(str(e), recipient)}")
         return False
 
 
