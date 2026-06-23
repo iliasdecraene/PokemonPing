@@ -11,9 +11,12 @@
     "id": "wog",
     "type": "wog",
     "label": "WOG.ch",
-    "search_term": "Pokemon",
-    "platform_name": "Trading Cards",
+    "platform_id": "tc",
+    "tag": "392",
+    "order_by": "releasedate",
     "name_filter": "-EN-",
-    "max_pages": 5
+    "match_field": "seriesName",
+    "platform_name": "Trading Cards",
+    "max_pages": 8
   }
 ]

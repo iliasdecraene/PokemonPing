@@ -78,10 +78,13 @@ DEFAULT_SITES = [
         "id": "wog",
         "type": "wog",
         "label": "WOG.ch",
-        "search_term": "Pokemon",       # accent-insensitive on wog
-        "platform_name": "Trading Cards",  # excludes Pokémon video games
-        "name_filter": "-EN-",          # wog's English-language marker
-        "max_pages": 5,                 # search is only reliable on early pages
+        "platform_id": "tc",            # "tc" = Trading Cards
+        "tag": "392",                   # "Pokémon TCG" genre tag (full catalog)
+        "order_by": "releasedate",
+        "name_filter": "-EN-",          # matched against seriesName (keeps the token)
+        "match_field": "seriesName",
+        "platform_name": "Trading Cards",
+        "max_pages": 8,
     },
 ]
 
@@ -200,31 +203,43 @@ def _woo_price(prices: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Adapter: wog.ch ajax.search
+# Adapter: wog.ch ajax.productList
 # --------------------------------------------------------------------------- #
+# wog.ch is JavaScript-rendered, but its grid is filled by POSTing to the same
+# `ajax.productList` endpoint the site itself uses. We browse a platform + a
+# genre tag (e.g. Trading Cards + "Pokémon TCG" tag 392) to get the *complete*
+# catalog with stable pagination — far more reliable than the search endpoint.
+#
+# Language note: the display `title` has the language suffix (e.g. "-EN-")
+# STRIPPED, but `seriesName` keeps it. So we match the language filter against
+# `seriesName`, not `title`. (English products also carry areaCodeText
+# "US-Version"/"UK-Version"; German ones have none.)
 
 def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
-    search_term = site.get("search_term", "Pokemon")
-    platform_name = site.get("platform_name", "Trading Cards")
-    name_filter = site.get("name_filter", "-EN-")
-    max_pages = int(site.get("max_pages", 5))
-    max_rows = int(site.get("max_rows", 48))  # >48 returns a degraded payload
+    platform_id = site.get("platform_id", "tc")        # "tc" = Trading Cards
+    tag = str(site.get("tag", "392"))                  # 392 = Pokémon TCG genre
+    order_by = site.get("order_by", "releasedate")
+    name_filter = site.get("name_filter", "-EN-")      # matched against seriesName
+    match_field = site.get("match_field", "seriesName")
+    platform_name = site.get("platform_name", "Trading Cards")  # defence-in-depth
+    max_pages = int(site.get("max_pages", 8))
+    max_rows = int(site.get("max_rows", 48))           # >48 returns a degraded payload
     base = site.get("base_url", "https://www.wog.ch/en/index.cfm")
 
     seen: dict = {}
     for page in range(1, max_pages + 1):
-        resp = session.post(
-            f"{base}/ajax.search",
-            data={"searchTerm": search_term, "page": page, "maxRows": max_rows},
-            timeout=40,
-        )
+        data = {"platformID": platform_id, "page": page,
+                "maxRows": max_rows, "orderBy": order_by}
+        if tag:
+            data["tag"] = tag
+        resp = session.post(f"{base}/ajax.productList", data=data, timeout=40)
         resp.raise_for_status()
         products = resp.json().get("products", [])
         for p in products:
-            title = p.get("title") or ""
-            if p.get("platformName") != platform_name:
+            match_value = p.get(match_field) or p.get("title") or ""
+            if name_filter and name_filter not in match_value:
                 continue
-            if name_filter and name_filter not in title:
+            if platform_name and p.get("platformName") != platform_name:
                 continue
             pid = p.get("productID")
             if pid in seen:
@@ -232,7 +247,7 @@ def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
             delivery = p.get("deliveryText") or ""
             unit_price = p.get("unitPrice")
             seen[pid] = make_item(
-                site, pid, title,
+                site, pid, p.get("title"),
                 in_stock=delivery in WOG_IN_STOCK,
                 price=(f"CHF {unit_price}" if unit_price else ""),
                 availability=delivery,

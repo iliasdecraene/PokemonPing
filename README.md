@@ -37,10 +37,12 @@ Each shop is handled by an **adapter** chosen by the site's `type`:
   (`/wp-json/wc/store/v1/products`). Reliable structured JSON with
   `is_in_stock`, `prices`, `permalink`. Filtered by a brand id + a title
   substring.
-- **`wog`** — posts to wog.ch's internal `ajax.search` endpoint (which returns
-  JSON), keeps only the `Trading Cards` platform, and filters by a title
-  substring. (wog's site is JavaScript-rendered, but this is the same endpoint
-  its own search box calls.)
+- **`wog`** — posts to wog.ch's internal `ajax.productList` endpoint (which
+  returns JSON), browsing a platform + genre tag (Trading Cards + the
+  "Pokémon TCG" tag) to get the *complete* catalog, then filters by language.
+  wog strips the language suffix from the display `title`, so the filter matches
+  against `seriesName` (which keeps the `-EN-` marker). (wog's site is
+  JavaScript-rendered, but this is the same endpoint its own grid calls.)
 
 Adding a shop that uses an **existing** adapter is pure config — no code.
 
@@ -121,12 +123,20 @@ and variables → Actions → *Variables*) to a JSON array — see
   "id": "wog",
   "type": "wog",
   "label": "WOG.ch",
-  "search_term": "Pokemon",
-  "platform_name": "Trading Cards",
+  "platform_id": "tc",
+  "tag": "392",
+  "order_by": "releasedate",
   "name_filter": "-EN-",
-  "max_pages": 5
+  "match_field": "seriesName",
+  "platform_name": "Trading Cards",
+  "max_pages": 8
 }
 ```
+- `platform_id` `"tc"` = Trading Cards; `tag` `"392"` = the "Pokémon TCG" genre.
+  To watch a different genre/brand, open the platform's filter sidebar on wog and
+  read the tag id from the `Pokémon TCG`-style checkbox (`value="392"`).
+- `name_filter` is matched against `match_field` (default `seriesName`, which
+  keeps the `-EN-` language marker — the display title does not).
 
 `id` must be unique per shop (it namespaces the saved state). `label` is what
 shows up in the WhatsApp message.
@@ -149,16 +159,15 @@ First local run seeds `state.json`; later runs alert on changes. `state.json`,
 
 ## Notes, limits & honest expectations
 
-- **wog.ch reality:** at the time of writing, wog has **no in-stock English
-  (`-EN-`) Pokémon sealed products** — the `-EN-` items it lists are "no longer
-  available", and what's in stock is mostly accessories/`-DE-`. That's fine:
-  the notifier is exactly what tells you when one of them **restocks** or a
-  **new `-EN-` product appears**. The `-EN-` filter is correct; the inventory
-  just moves.
-- **wog.ch search depth:** wog's search is reliable on the first pages (real
-  Pokémon hits) but pads with loosely-related items deeper, so the adapter caps
-  at `max_pages` (default 5). That covers new + restocking English Pokémon
-  without hammering their server.
+- **wog.ch reality:** at the time of writing, wog tracks **14 English Pokémon
+  TCG products, all currently out of stock** ("no longer available"); what's in
+  stock is mostly accessories and German (`-DE-`) items. That's fine: the
+  notifier is exactly what tells you when one of those English products
+  **restocks** or a **new English product appears**.
+- **wog.ch language detection:** wog strips the `-EN-` suffix from the display
+  title, so matching the title alone misses most English products (which have
+  English *names* but no token). The adapter matches `seriesName` instead, which
+  keeps the marker — this is why it finds 14, not 5.
 - **Speed:** GitHub's scheduled jobs are throttled and often run **5–15 min
   late**. Great for restocks / new listings; **not** fast enough to win drops
   that sell out in seconds (that needs sub-minute polling + auto-checkout).
