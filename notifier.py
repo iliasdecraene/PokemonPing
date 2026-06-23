@@ -295,10 +295,17 @@ def save_state(state: dict[str, dict]) -> None:
 # --------------------------------------------------------------------------- #
 
 def build_alerts(prev: dict[str, dict], curr: dict[str, dict]) -> list[str]:
+    # Sites we have *any* prior state for. A site we've never recorded (newly
+    # added, or one whose catalog suddenly expanded) is seeded silently rather
+    # than blasting its whole catalog as "new".
+    known_sites = {k.split(":", 1)[0] for k in prev}
     alerts: list[str] = []
     for key, now in curr.items():
+        site_id = key.split(":", 1)[0]
         before = prev.get(key)
         if before is None:
+            if site_id not in known_sites:
+                continue  # silent seed for a brand-new site
             tag = "🆕 New" + (" (in stock)" if now["in_stock"] else " (not yet in stock)")
             alerts.append(render_message(tag, now))
         elif not before.get("in_stock") and now["in_stock"]:
