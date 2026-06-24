@@ -25,5 +25,13 @@
     "label": "WellPlayed",
     "collection_url": "https://www.wellplayed.ch/collections/pokemon",
     "name_filter": "(EN)"
+  },
+  {
+    "id": "laschocards",
+    "type": "shopify",
+    "label": "Laschocards (pre-order)",
+    "collection_url": "https://laschocards.ch/en/collections/pre-order",
+    "variant_filter": "English",
+    "alert_on": ["new"]
   }
 ]

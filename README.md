@@ -20,6 +20,7 @@ services. State lives in the Actions cache, so it only ever alerts on *changes*.
 | [cardcollectors.ch](https://cardcollectors.ch) | Pokémon products with `(EN)` in the title | WooCommerce Store API (clean JSON) |
 | [wog.ch](https://www.wog.ch) | Pokémon **Trading Cards** with `-EN-` in the title | wog's `ajax.search` JSON endpoint |
 | [wellplayed.ch](https://www.wellplayed.ch/collections/pokemon) | Pokémon TCG products with `(EN)` in the title | Shopify `products.json` collection feed |
+| [laschocards.ch](https://laschocards.ch/en/collections/pre-order) | **New** English pre-orders only (language is a variant) | Shopify feed, per-variant tracking, `new`-only alerts |
 
 ---
 
@@ -168,6 +169,15 @@ and variables → Actions → *Variables*) to a JSON array — see
 - `collection_url` is the shop's collection page; the adapter reads
   `<collection_url>/products.json`. Works on any Shopify shop — point it at the
   collection you want and set `name_filter` to a title substring.
+- `variant_filter` *(optional)* — when language/edition is a Shopify **variant**
+  rather than part of the title (e.g. a `Language: English/German/French`
+  option), set this to the variant name (e.g. `"English"`). Each matching
+  variant is then tracked on its own — its own stock, its own price, and a deep
+  `?variant=…` link straight to that language.
+- `alert_on` *(optional, any site type)* — which changes notify you. Defaults to
+  `["new", "restock"]`. Use `["new"]` for a **pre-order shop** that re-lists the
+  same item at ever-rising prices (you only want the first, retail-priced drop);
+  use `["restock"]` if you only care about back-in-stock events.
 
 `id` must be unique per shop (it namespaces the saved state). `label` is what
 shows up in the WhatsApp message.

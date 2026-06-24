@@ -44,6 +44,7 @@ jobs:
           CALLMEBOT_RECIPIENTS: ${{ secrets.CALLMEBOT_RECIPIENTS }}
           # Optional: override the watched shops without editing notifier.py.
           # Set a repo VARIABLE named SITES to a JSON array (see sites.local.json.example).
-          # Leave unset to use the built-in defaults (CardCollectors + WOG.ch + WellPlayed).
+          # Leave unset to use the built-in defaults
+          # (CardCollectors + WOG.ch + WellPlayed + Laschocards).
           SITES: ${{ vars.SITES }}
         run: python notifier.py

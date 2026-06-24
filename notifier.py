@@ -95,6 +95,18 @@ DEFAULT_SITES = [
         "collection_url": "https://www.wellplayed.ch/collections/pokemon",
         "name_filter": "(EN)",   # English Pokémon TCG products carry "(EN)"
     },
+    {
+        "id": "laschocards",
+        "type": "shopify",
+        "label": "Laschocards (pre-order)",
+        "collection_url": "https://laschocards.ch/en/collections/pre-order",
+        # Language is a Shopify variant here, not in the title. Track the
+        # English variant specifically (its own stock + ?variant= link).
+        "variant_filter": "English",
+        # Pre-order shop: it "restocks" the same item at rising prices. Only the
+        # FIRST appearance is at retail, so alert on new listings ONLY.
+        "alert_on": ["new"],
+    },
 ]
 
 
@@ -190,6 +202,12 @@ def make_item(site, pid, name, in_stock, price, availability, link) -> dict:
         "price": price or "",
         "availability": availability or "",
         "link": link or "",
+        # Which transitions should alert for this site:
+        #   "new"     -> a listing we've never seen before
+        #   "restock" -> a known listing going out-of-stock -> in-stock
+        # Defaults to both. Some sites (e.g. pre-order shops that "restock" the
+        # same product at ever-higher prices) only want "new".
+        "alert_on": list(site.get("alert_on") or ["new", "restock"]),
     }
 
 
@@ -316,10 +334,16 @@ def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
 def fetch_shopify(site: dict, session: requests.Session) -> list[dict]:
     collection_url = site["collection_url"].rstrip("/")
     name_filter = (site.get("name_filter") or "").lower()
+    # When set, language/variant is a Shopify *variant* (not in the title). We
+    # then track each matching variant separately (key = variant id) and check
+    # that variant's own stock. e.g. variant_filter "English" on a shop whose
+    # products have a Language option.
+    variant_filter = (site.get("variant_filter") or "").lower()
     per_page = int(site.get("per_page", 250))           # 250 = Shopify's max
-    # Base shop origin for building product links (scheme://host).
-    parts = urllib.parse.urlsplit(collection_url)
-    base = f"{parts.scheme}://{parts.netloc}"
+
+    # Product links: keep any locale prefix (e.g. ".../en/") that precedes
+    # "/collections", so links land on the right localized product page.
+    product_base = collection_url.split("/collections", 1)[0]
 
     items: list[dict] = []
     page = 1
@@ -334,7 +358,27 @@ def fetch_shopify(site: dict, session: requests.Session) -> list[dict]:
             title = p.get("title") or ""
             if name_filter and name_filter not in title.lower():
                 continue
+            handle = p.get("handle")
             variants = p.get("variants") or []
+
+            if variant_filter:
+                # One item per matching variant (e.g. the English one).
+                for v in variants:
+                    vtitle = (v.get("title") or "")
+                    if variant_filter not in vtitle.lower():
+                        continue
+                    avail = bool(v.get("available"))
+                    price = v.get("price")
+                    items.append(make_item(
+                        site, v.get("id"), f"{title} — {vtitle}",
+                        in_stock=avail,
+                        price=(f"CHF {price}" if price else ""),
+                        availability=("In stock" if avail else "Sold out"),
+                        link=f"{product_base}/products/{handle}?variant={v.get('id')}",
+                    ))
+                continue
+
+            # Default: one item per product, in stock if any variant is.
             in_stock = any(v.get("available") for v in variants)
             price = variants[0].get("price") if variants else None
             items.append(make_item(
@@ -342,7 +386,7 @@ def fetch_shopify(site: dict, session: requests.Session) -> list[dict]:
                 in_stock=in_stock,
                 price=(f"CHF {price}" if price else ""),
                 availability=("In stock" if in_stock else "Sold out"),
-                link=f"{base}/products/{p.get('handle')}",
+                link=f"{product_base}/products/{handle}",
             ))
         if len(products) < per_page:
             break
@@ -397,13 +441,18 @@ def build_alerts(prev: dict[str, dict], curr: dict[str, dict]) -> list[str]:
     alerts: list[str] = []
     for key, now in curr.items():
         site_id = key.split(":", 1)[0]
+        alert_on = now.get("alert_on") or ["new", "restock"]
         before = prev.get(key)
         if before is None:
             if site_id not in known_sites:
                 continue  # silent seed for a brand-new site
+            if "new" not in alert_on:
+                continue
             tag = "🆕 New" + (" (in stock)" if now["in_stock"] else " (not yet in stock)")
             alerts.append(render_message(tag, now))
         elif not before.get("in_stock") and now["in_stock"]:
+            if "restock" not in alert_on:
+                continue
             alerts.append(render_message("📦 Back in stock", now))
     return alerts
 
