@@ -17,6 +17,8 @@ Adapters currently supported (the "type" field):
   * "woocommerce" - any WooCommerce shop's Store API (clean JSON).
                     e.g. cardcollectors.ch
   * "wog"         - wog.ch's ajax.search endpoint (JSON).
+  * "shopify"     - any Shopify shop's <collection>/products.json feed.
+                    e.g. wellplayed.ch
 
 State (what we saw last run) is kept in a small JSON file so we only alert on
 *changes*. On GitHub Actions that file is persisted via the Actions cache.
@@ -85,6 +87,13 @@ DEFAULT_SITES = [
         "match_field": "seriesName",
         "platform_name": "Trading Cards",
         "max_pages": 8,
+    },
+    {
+        "id": "wellplayed",
+        "type": "shopify",
+        "label": "WellPlayed",
+        "collection_url": "https://www.wellplayed.ch/collections/pokemon",
+        "name_filter": "(EN)",   # English Pokémon TCG products carry "(EN)"
     },
 ]
 
@@ -296,9 +305,57 @@ def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
     return list(seen.values())
 
 
+# --------------------------------------------------------------------------- #
+# Adapter: Shopify storefront JSON
+# --------------------------------------------------------------------------- #
+# Any Shopify shop exposes a public, clean JSON feed of a collection at
+# `<collection_url>/products.json`. Each product has `variants` with an
+# `available` boolean and a `price`; the product page is `<base>/products/<handle>`.
+# We page through it (250/page is Shopify's max) and filter by a title substring.
+
+def fetch_shopify(site: dict, session: requests.Session) -> list[dict]:
+    collection_url = site["collection_url"].rstrip("/")
+    name_filter = (site.get("name_filter") or "").lower()
+    per_page = int(site.get("per_page", 250))           # 250 = Shopify's max
+    # Base shop origin for building product links (scheme://host).
+    parts = urllib.parse.urlsplit(collection_url)
+    base = f"{parts.scheme}://{parts.netloc}"
+
+    items: list[dict] = []
+    page = 1
+    while True:
+        url = f"{collection_url}/products.json?limit={per_page}&page={page}"
+        resp = session.get(url, timeout=30, headers={"Accept": "application/json"})
+        resp.raise_for_status()
+        products = resp.json().get("products", [])
+        if not products:
+            break
+        for p in products:
+            title = p.get("title") or ""
+            if name_filter and name_filter not in title.lower():
+                continue
+            variants = p.get("variants") or []
+            in_stock = any(v.get("available") for v in variants)
+            price = variants[0].get("price") if variants else None
+            items.append(make_item(
+                site, p.get("id"), title,
+                in_stock=in_stock,
+                price=(f"CHF {price}" if price else ""),
+                availability=("In stock" if in_stock else "Sold out"),
+                link=f"{base}/products/{p.get('handle')}",
+            ))
+        if len(products) < per_page:
+            break
+        page += 1
+        if page > 50:  # safety stop
+            break
+    return items
+
+
 ADAPTERS = {
     "woocommerce": fetch_woocommerce,
     "wog": fetch_wog,
+    "shopify": fetch_shopify,
 }
 
 

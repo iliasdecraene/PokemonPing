@@ -18,5 +18,12 @@
     "match_field": "seriesName",
     "platform_name": "Trading Cards",
     "max_pages": 8
+  },
+  {
+    "id": "wellplayed",
+    "type": "shopify",
+    "label": "WellPlayed",
+    "collection_url": "https://www.wellplayed.ch/collections/pokemon",
+    "name_filter": "(EN)"
   }
 ]

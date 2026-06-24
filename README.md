@@ -19,6 +19,7 @@ services. State lives in the Actions cache, so it only ever alerts on *changes*.
 |------|----------------|-----|
 | [cardcollectors.ch](https://cardcollectors.ch) | Pokémon products with `(EN)` in the title | WooCommerce Store API (clean JSON) |
 | [wog.ch](https://www.wog.ch) | Pokémon **Trading Cards** with `-EN-` in the title | wog's `ajax.search` JSON endpoint |
+| [wellplayed.ch](https://www.wellplayed.ch/collections/pokemon) | Pokémon TCG products with `(EN)` in the title | Shopify `products.json` collection feed |
 
 ---
 
@@ -47,6 +48,10 @@ Each shop is handled by an **adapter** chosen by the site's `type`:
   wog strips the language suffix from the display `title`, so the filter matches
   against `seriesName` (which keeps the `-EN-` marker). (wog's site is
   JavaScript-rendered, but this is the same endpoint its own grid calls.)
+- **`shopify`** — fetches a Shopify collection's public `products.json` feed
+  (e.g. `…/collections/pokemon/products.json`). Clean JSON with per-variant
+  `available` + `price`; stock = any variant available. Filtered by a title
+  substring.
 
 Adding a shop that uses an **existing** adapter is pure config — no code.
 
@@ -149,6 +154,20 @@ and variables → Actions → *Variables*) to a JSON array — see
   read the tag id from the `Pokémon TCG`-style checkbox (`value="392"`).
 - `name_filter` is matched against `match_field` (default `seriesName`, which
   keeps the `-EN-` language marker — the display title does not).
+
+**Shopify shop:**
+```json
+{
+  "id": "wellplayed",
+  "type": "shopify",
+  "label": "WellPlayed",
+  "collection_url": "https://www.wellplayed.ch/collections/pokemon",
+  "name_filter": "(EN)"
+}
+```
+- `collection_url` is the shop's collection page; the adapter reads
+  `<collection_url>/products.json`. Works on any Shopify shop — point it at the
+  collection you want and set `name_filter` to a title substring.
 
 `id` must be unique per shop (it namespaces the saved state). `label` is what
 shows up in the WhatsApp message.
