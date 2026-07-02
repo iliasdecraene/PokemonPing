@@ -37,10 +37,11 @@ from pathlib import Path
 import requests
 
 # Make console output UTF-8 safe (Windows defaults to cp1252, which can't
-# print emoji and would crash). Does not affect the WhatsApp message itself.
+# print emoji and would crash). line_buffering matters in loop mode: without
+# it, GitHub Actions buffers stdout and the log looks dead for hours.
 for _stream in (sys.stdout, sys.stderr):
     try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+        _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except (AttributeError, ValueError):
         pass
 
@@ -555,6 +556,49 @@ def notify_all(messages: list[str], recipients: list[dict], telegram: dict | Non
 # Main
 # --------------------------------------------------------------------------- #
 
+def run_cycle(sites, recipients, telegram, session, verbose: bool) -> int | None:
+    """One poll of every site: fetch, diff against state, send alerts, save.
+
+    Returns the number of alerts sent, or None if every site failed to fetch
+    (state is left untouched in that case).
+    """
+    curr: dict[str, dict] = {}
+    for site in sites:
+        try:
+            items = fetch_site(site, session)
+            curr.update({it["key"]: it for it in items})
+            if verbose:
+                print(f"[{site['id']}] {len(items)} matching product(s).")
+        except Exception as e:
+            # One flaky shop shouldn't kill the whole cycle.
+            print(f"[{site['id']}] ERROR: {e}")
+
+    if not curr:
+        print("No products fetched from any site; leaving state untouched.")
+        return None
+
+    prev = load_state()
+    if not prev:
+        print("First run: seeding state silently (no alerts).")
+        save_state(curr)
+        return 0
+
+    alerts = build_alerts(prev, curr)
+    if verbose or alerts:
+        print(f"{len(alerts)} alert(s) to send.")
+    if alerts:
+        notify_all(alerts, recipients, telegram)
+
+    # Carry forward items from sites that errored this cycle, so a transient
+    # failure doesn't make everything look "new" next time. We only replace the
+    # state for sites we actually fetched.
+    fetched_sites = {it["key"].split(":", 1)[0] for it in curr.values()}
+    merged = {k: v for k, v in prev.items() if k.split(":", 1)[0] not in fetched_sites}
+    merged.update(curr)
+    save_state(merged)
+    return len(alerts)
+
+
 def main() -> int:
     sites = load_sites()
     recipients = load_recipients()
@@ -574,38 +618,43 @@ def main() -> int:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
 
-    curr: dict[str, dict] = {}
-    for site in sites:
+    # POLL_SECONDS > 0 turns on loop mode: keep polling every POLL_SECONDS for
+    # up to MAX_RUNTIME_MINUTES, then exit cleanly so the workflow's cron can
+    # start a fresh job (GitHub kills jobs at 6h; we stop before that so the
+    # state cache still gets saved). POLL_SECONDS unset/0 = single pass, which
+    # is what you want for local testing.
+    poll_seconds = int(os.environ.get("POLL_SECONDS", "0") or 0)
+    if poll_seconds <= 0:
+        return 0 if run_cycle(sites, recipients, telegram, session, verbose=True) is not None else 1
+
+    max_minutes = float(os.environ.get("MAX_RUNTIME_MINUTES", "345") or 345)
+    deadline = time.monotonic() + max_minutes * 60
+    print(f"Loop mode: polling every {poll_seconds}s for up to {max_minutes:.0f} min.")
+
+    cycle = 0
+    while True:
+        cycle += 1
+        started = time.monotonic()
         try:
-            items = fetch_site(site, session)
-            curr.update({it["key"]: it for it in items})
-            print(f"[{site['id']}] {len(items)} matching product(s).")
+            sent = run_cycle(sites, recipients, telegram, session,
+                             verbose=(cycle == 1))
+            # Log the first cycle, every alert, and a heartbeat every ~10 min
+            # so the Actions log shows the loop is alive without being spammy.
+            if cycle == 1 or sent or cycle % 20 == 0:
+                print(f"{time.strftime('%H:%M:%S')} cycle {cycle}: "
+                      f"{'fetch failed' if sent is None else f'{sent} alert(s)'}")
         except Exception as e:
-            # One flaky shop shouldn't kill the whole run.
-            print(f"[{site['id']}] ERROR: {e}")
+            # Never let one bad cycle kill the whole shift.
+            print(f"{time.strftime('%H:%M:%S')} cycle {cycle} ERROR: {e}")
 
-    if not curr:
-        print("No products fetched from any site; leaving state untouched.")
-        return 1
+        wait = max(0.0, poll_seconds - (time.monotonic() - started))
+        if time.monotonic() + wait >= deadline:
+            break
+        if wait:
+            time.sleep(wait)
 
-    prev = load_state()
-    if not prev:
-        print("First run: seeding state silently (no alerts).")
-        save_state(curr)
-        return 0
-
-    alerts = build_alerts(prev, curr)
-    print(f"{len(alerts)} alert(s) to send.")
-    if alerts:
-        notify_all(alerts, recipients, telegram)
-
-    # Carry forward items from sites that errored this run, so a transient
-    # failure doesn't make everything look "new" next time. We only replace the
-    # state for sites we actually fetched.
-    fetched_sites = {it["key"].split(":", 1)[0] for it in curr.values()}
-    merged = {k: v for k, v in prev.items() if k.split(":", 1)[0] not in fetched_sites}
-    merged.update(curr)
-    save_state(merged)
+    print(f"Shift over after {cycle} cycle(s); exiting so the next scheduled "
+          f"run takes over.")
     return 0
 
 

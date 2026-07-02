@@ -2,12 +2,16 @@ name: Pokemon Drop Notifier
 
 on:
   schedule:
-    # Every 5 minutes. GitHub throttles scheduled jobs under load, so real
-    # cadence is often 5-15 min. Good enough for restocks / new listings.
-    - cron: "*/5 * * * *"
+    # The notifier runs in LOOP MODE: each job polls every ~30s for up to
+    # ~5h45m, then exits. This cron doesn't set the polling speed — it only
+    # (re)starts the loop. Every 15 min means a crashed job is replaced within
+    # ~15 min; while a loop is running, extra triggers just wait/replace each
+    # other in the concurrency queue (at most one pending).
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}   # lets you run it manually from the Actions tab
 
-# Never let two runs overlap (they'd fight over the shared state).
+# Never let two loops overlap (they'd fight over the shared state). A queued
+# run waits until the running shift exits, then takes over seamlessly.
 concurrency:
   group: pokemon-drop-notifier
   cancel-in-progress: false
@@ -15,6 +19,9 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
+    # Give ourselves headroom under GitHub's 6h hard kill so the state cache
+    # still gets saved when the loop exits on its own.
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v6
 
@@ -47,4 +54,10 @@ jobs:
           # Leave unset to use the built-in defaults
           # (CardCollectors + WOG.ch + WellPlayed + Laschocards).
           SITES: ${{ vars.SITES }}
+          # Loop mode: poll every N seconds inside one long job. Override with a
+          # repo VARIABLE named POLL_SECONDS (e.g. 60 to be gentler on the shops).
+          POLL_SECONDS: ${{ vars.POLL_SECONDS || 30 }}
+          # Exit after ~5h45m so the cache save still happens before GitHub's
+          # 6h job kill; the cron starts the next shift.
+          MAX_RUNTIME_MINUTES: "345"
         run: python notifier.py
