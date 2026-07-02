@@ -27,8 +27,8 @@ services. State lives in the Actions cache, so it only ever alerts on *changes*.
 ## How it works
 
 ```
-GitHub Actions cron (every ~5 min)
-        │
+GitHub Actions job (a ~6h "shift", restarted by cron)
+        │  loops every ~30 s
         ▼
   notifier.py ──► for each configured shop, an "adapter" fetches products
         │          → normalize to {name, in_stock, price, link}
@@ -209,16 +209,18 @@ First local run seeds `state.json`; later runs alert on changes. `state.json`,
   title, so matching the title alone misses most English products (which have
   English *names* but no token). The adapter matches `seriesName` instead, which
   keeps the marker — this is why it finds 14, not 5.
-- **Speed:** GitHub's scheduled jobs are throttled and often run **5–15 min
-  late**. Great for restocks / new listings; **not** fast enough to win drops
-  that sell out in seconds (that needs sub-minute polling + auto-checkout).
-- **Near-real-time upgrade:** to poll every ~60s, turn `main()` into a loop
-  (poll → sleep 60s → repeat) up to the 6-hour job limit, with the cron just
-  restarting it. Ask and I'll wire it up.
+- **Speed:** the notifier runs in **loop mode** — one Actions job polls every
+  ~30 s (set the `POLL_SECONDS` repo variable to tune) for up to ~5h45m, then
+  exits and the cron starts the next shift. Typical alert latency is **under a
+  minute**. There's a small gap (~1–2 min) at each shift handover every ~6 h,
+  and this is only free because **public repos get unlimited Actions minutes**
+  — a private repo would burn ~43,000 min/month, far past any paid plan's
+  included minutes. Unset `POLL_SECONDS` (local runs) = one single pass.
 - **Resilience:** if one shop's request fails, the run logs it and continues
   with the others; that shop's previous state is preserved (no false "new"
   alerts next run).
 - **CallMeBot** is a free third-party relay (it only messages people who opted
   in). Messages are spaced out to respect its rate limits.
-- **Be polite to the shops:** the default ~5-min cadence is light. Don't crank
-  the cron to every few seconds.
+- **Be polite to the shops:** ~30 s polling of lightweight JSON endpoints is
+  acceptable, but don't push it much lower — if a shop starts erroring or
+  blocking, raise `POLL_SECONDS` (e.g. to 60 or 120).
