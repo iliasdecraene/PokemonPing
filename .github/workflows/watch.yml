@@ -3,18 +3,23 @@ name: Pokemon Drop Notifier
 on:
   schedule:
     # The notifier runs in LOOP MODE: each job polls every ~30s for up to
-    # ~5h45m, then exits. This cron doesn't set the polling speed — it only
-    # (re)starts the loop. Every 15 min means a crashed job is replaced within
-    # ~15 min; while a loop is running, extra triggers just wait/replace each
-    # other in the concurrency queue (at most one pending).
+    # ~5h45m, then dispatches its own successor (see "Start next shift").
+    # This cron is only a CRASH BACKUP: GitHub throttles scheduled runs
+    # brutally (observed: fired every 1-4.5 h despite */15), so it can't be
+    # the primary restart mechanism. Extra triggers while a shift is running
+    # just wait/replace each other in the concurrency queue (at most one
+    # pending).
     - cron: "*/15 * * * *"
-  workflow_dispatch: {}   # lets you run it manually from the Actions tab
+  workflow_dispatch: {}   # manual start + how a shift launches its successor
 
 # Never let two loops overlap (they'd fight over the shared state). A queued
 # run waits until the running shift exits, then takes over seamlessly.
 concurrency:
   group: pokemon-drop-notifier
   cancel-in-progress: false
+
+permissions:
+  actions: write   # lets a finishing shift dispatch the next one
 
 jobs:
   watch:
@@ -61,3 +66,15 @@ jobs:
           # 6h job kill; the cron starts the next shift.
           MAX_RUNTIME_MINUTES: "345"
         run: python notifier.py
+
+      # Chain the next shift immediately instead of waiting on the throttled
+      # cron. workflow_dispatch via GITHUB_TOKEN does start a run (it's an
+      # explicit exception to the no-recursive-triggers rule), and the
+      # concurrency group makes it wait until this run fully finishes.
+      # Only on success — if the job itself is broken, chaining would spin
+      # forever; the cron picks up the pieces instead.
+      - name: Start next shift
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run watch.yml --repo ${{ github.repository }}
