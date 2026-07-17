@@ -55,6 +55,15 @@ SEND_DELAY_SECONDS = 4
 
 STATE_FILE = Path(os.environ.get("STATE_FILE", "state.json"))
 
+# Never re-send the same alert (same event, same item) within this window.
+# Guards against flaky feeds: Shopify's CDN can flap an item in/out of the
+# products.json snapshot between cycles, which must not re-trigger alerts.
+ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "1800") or 0)
+
+# Reserved state key (never a real "site:product" key) holding the recent-alert
+# timestamps used for the cooldown above.
+RECENT_ALERTS_KEY = "_meta:recent_alerts"
+
 # Treated as "in stock" for the wog.ch adapter (green availability states).
 WOG_IN_STOCK = {"in stock normally", "in external stock"}
 
@@ -434,12 +443,17 @@ def save_state(state: dict[str, dict]) -> None:
 # Diffing -> alerts
 # --------------------------------------------------------------------------- #
 
-def build_alerts(prev: dict[str, dict], curr: dict[str, dict]) -> list[str]:
+def build_alerts(prev: dict[str, dict], curr: dict[str, dict]) -> list[tuple[str, str]]:
+    """Return (event_id, message) pairs, e.g. ("new:laschocards:123", "...").
+
+    The event id names the exact event so the caller can suppress repeats of
+    the same event (cooldown) without ever blocking a *different* alert.
+    """
     # Sites we have *any* prior state for. A site we've never recorded (newly
     # added, or one whose catalog suddenly expanded) is seeded silently rather
     # than blasting its whole catalog as "new".
     known_sites = {k.split(":", 1)[0] for k in prev}
-    alerts: list[str] = []
+    alerts: list[tuple[str, str]] = []
     for key, now in curr.items():
         site_id = key.split(":", 1)[0]
         alert_on = now.get("alert_on") or ["new", "restock"]
@@ -450,11 +464,11 @@ def build_alerts(prev: dict[str, dict], curr: dict[str, dict]) -> list[str]:
             if "new" not in alert_on:
                 continue
             tag = "🆕 New" + (" (in stock)" if now["in_stock"] else " (not yet in stock)")
-            alerts.append(render_message(tag, now))
+            alerts.append((f"new:{key}", render_message(tag, now)))
         elif not before.get("in_stock") and now["in_stock"]:
             if "restock" not in alert_on:
                 continue
-            alerts.append(render_message("📦 Back in stock", now))
+            alerts.append((f"restock:{key}", render_message("📦 Back in stock", now)))
     return alerts
 
 
@@ -584,19 +598,35 @@ def run_cycle(sites, recipients, telegram, session, verbose: bool) -> int | None
         return 0
 
     alerts = build_alerts(prev, curr)
-    if verbose or alerts:
-        print(f"{len(alerts)} alert(s) to send.")
-    if alerts:
-        notify_all(alerts, recipients, telegram)
 
-    # Carry forward items from sites that errored this cycle, so a transient
-    # failure doesn't make everything look "new" next time. We only replace the
-    # state for sites we actually fetched.
-    fetched_sites = {it["key"].split(":", 1)[0] for it in curr.values()}
-    merged = {k: v for k, v in prev.items() if k.split(":", 1)[0] not in fetched_sites}
+    # Cooldown: never re-send the same event twice within the window. A flaky
+    # feed can flap an item out of one snapshot and back into the next, and
+    # without this a single glitch repeats the same alert forever.
+    now_ts = time.time()
+    recent = {
+        eid: ts
+        for eid, ts in (prev.get(RECENT_ALERTS_KEY) or {}).items()
+        if isinstance(ts, (int, float)) and now_ts - ts < ALERT_COOLDOWN_SECONDS
+    }
+    fresh = [(eid, msg) for eid, msg in alerts if eid not in recent]
+    if len(alerts) != len(fresh):
+        print(f"Suppressed {len(alerts) - len(fresh)} repeat alert(s) (cooldown).")
+    if verbose or fresh:
+        print(f"{len(fresh)} alert(s) to send.")
+    if fresh:
+        notify_all([msg for _, msg in fresh], recipients, telegram)
+    for eid, _ in fresh:
+        recent[eid] = now_ts
+
+    # Merge, never delete: an item missing from this cycle's fetch stays in
+    # state. Deleting it would make a flaky-feed comeback look brand "new"
+    # (=> alert spam); a delisted product's entry just lingers harmlessly.
+    # This also carries forward everything from sites that errored this cycle.
+    merged = dict(prev)
     merged.update(curr)
+    merged[RECENT_ALERTS_KEY] = recent
     save_state(merged)
-    return len(alerts)
+    return len(fresh)
 
 
 def main() -> int:

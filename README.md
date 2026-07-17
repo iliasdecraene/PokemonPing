@@ -219,6 +219,10 @@ First local run seeds `state.json`; later runs alert on changes. `state.json`,
 - **Resilience:** if one shop's request fails, the run logs it and continues
   with the others; that shop's previous state is preserved (no false "new"
   alerts next run).
+- **No repeat spam:** items are never forgotten once seen — a flaky feed (CDN
+  cache) that briefly drops a product can't make its comeback look "new" —
+  and the same alert is never re-sent within 30 min
+  (`ALERT_COOLDOWN_SECONDS` to tune).
 - **CallMeBot** is a free third-party relay (it only messages people who opted
   in). Messages are spaced out to respect its rate limits.
 - **Be polite to the shops:** ~30 s polling of lightweight JSON endpoints is
