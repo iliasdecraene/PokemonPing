@@ -33,5 +33,22 @@
     "collection_url": "https://laschocards.ch/en/collections/pre-order",
     "variant_filter": "English",
     "alert_on": ["new"]
+  },
+  {
+    "id": "detsuki",
+    "type": "shopify",
+    "label": "Detsuki",
+    "collection_url": "https://detsuki.ch/collections/pokemon",
+    "variant_filter": "English"
+  },
+  {
+    "id": "uncommonshop",
+    "type": "woocommerce",
+    "label": "The Uncommon Shop",
+    "api_url": "https://theuncommonshop.ch/wp-json/wc/store/v1/products?category=283,279,280,281,284,286,287,285&orderby=date&order=desc",
+    "per_page": 50,
+    "exclude_category_terms": ["japanisch", "chinesisch", "koreanisch"],
+    "require_attribute": {"name": "Sprache", "value": "Englisch"},
+    "min_poll_seconds": 120
   }
 ]

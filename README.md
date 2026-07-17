@@ -21,6 +21,8 @@ services. State lives in the Actions cache, so it only ever alerts on *changes*.
 | [wog.ch](https://www.wog.ch) | Pokémon **Trading Cards** with `-EN-` in the title | wog's `ajax.search` JSON endpoint |
 | [wellplayed.ch](https://www.wellplayed.ch/collections/pokemon) | Pokémon TCG products with `(EN)` in the title | Shopify `products.json` collection feed |
 | [laschocards.ch](https://laschocards.ch/en/collections/pre-order) | **New** English pre-orders only (language is a variant) | Shopify feed, per-variant tracking, `new`-only alerts |
+| [detsuki.ch](https://detsuki.ch/collections/pokemon) | English variants of Pokémon products (language is a variant) | Shopify feed, per-variant tracking |
+| [theuncommonshop.ch](https://theuncommonshop.ch) | Sealed English Pokémon TCG (displays, ETBs, boxes, tins…) | WooCommerce Store API, category + `Sprache` attribute filters, polled every ~2 min |
 
 ---
 
@@ -134,6 +136,15 @@ and variables → Actions → *Variables*) to a JSON array — see
 - Find a brand id: open `https://SHOP/wp-json/wc/store/v1/products/brands?per_page=100`
   and read the `id` for the brand you want. (Or use `category=<id>` in `api_url`
   and look at `…/products/categories`.)
+- `exclude_category_terms` *(optional)* — skip products whose category names
+  contain any of these substrings (e.g. `["japanisch"]` drops everything in a
+  "Booster Displays (Japanisch)" category).
+- `require_attribute` *(optional)* — e.g. `{"name": "Sprache", "value":
+  "Englisch"}`: skip products that HAVE the attribute but lack the value.
+  Products without the attribute are kept.
+- `min_poll_seconds` *(optional, any site type)* — in loop mode, poll this site
+  at most every N seconds (others keep the fast cadence). Use for shops with
+  big catalogs or touchy rate limiting.
 
 **wog.ch:**
 ```json

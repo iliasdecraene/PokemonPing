@@ -117,6 +117,39 @@ DEFAULT_SITES = [
         # FIRST appearance is at retail, so alert on new listings ONLY.
         "alert_on": ["new"],
     },
+    {
+        "id": "detsuki",
+        "type": "shopify",
+        "label": "Detsuki",
+        "collection_url": "https://detsuki.ch/collections/pokemon",
+        # Titles carry no language marker; language is a "Language" variant
+        # (English/French/German/Japanese). Track the English variants.
+        "variant_filter": "English",
+    },
+    {
+        "id": "uncommonshop",
+        "type": "woocommerce",
+        "label": "The Uncommon Shop",
+        # The Pokémon sealed-product subcategories (Boxen & Kollektionen,
+        # Booster Displays/Packs, Top Trainer Boxen, Tins, Decks, Blister
+        # Packs, Mystery Boxen). Deliberately excludes single cards (~1000
+        # products that churn constantly) and accessories/plushies.
+        "api_url": "https://theuncommonshop.ch/wp-json/wc/store/v1/products"
+                   "?category=283,279,280,281,284,286,287,285"
+                   "&orderby=date&order=desc",
+        # Their WAF rejects per_page=100 with a 403; 50 is accepted.
+        "per_page": 50,
+        # Japanese/Chinese/Korean editions live in "... (Japanisch)"-style
+        # subcategories; drop them by category name.
+        "exclude_category_terms": ["japanisch", "chinesisch", "koreanisch"],
+        # Language is the "Sprache" product attribute. Keep products that list
+        # Englisch; products without the attribute (Pokémon Center ETBs etc.)
+        # are kept — on this shop those are English imports.
+        "require_attribute": {"name": "Sprache", "value": "Englisch"},
+        # ~600 products across ~18 pages per poll — too many requests to repeat
+        # every 30 s, and their WAF is trigger-happy. Poll every 2 min instead.
+        "min_poll_seconds": 120,
+    },
 ]
 
 
@@ -230,6 +263,15 @@ def fetch_woocommerce(site: dict, session: requests.Session) -> list[dict]:
     name_filter = (site.get("name_filter") or "").lower()
     brand_id = str(site.get("brand_id") or "")
     per_page = int(site.get("per_page", 100))
+    # Skip products whose category names contain any of these substrings
+    # (e.g. ["japanisch"] drops a "Booster Displays (Japanisch)" category).
+    excl_terms = [t.lower() for t in (site.get("exclude_category_terms") or [])]
+    # Require a product attribute to contain a value, e.g.
+    # {"name": "Sprache", "value": "Englisch"}. Products *without* the
+    # attribute are kept (shops often omit it on single-language items).
+    req_attr = site.get("require_attribute") or {}
+    req_attr_name = (req_attr.get("name") or "").lower()
+    req_attr_value = (req_attr.get("value") or "").lower()
 
     sep = "&" if "?" in api_url else "?"
     items: list[dict] = []
@@ -249,6 +291,13 @@ def fetch_woocommerce(site: dict, session: requests.Session) -> list[dict]:
                 brand_ids = {str(b.get("id")) for b in (p.get("brands") or [])}
                 if brand_id not in brand_ids:
                     continue
+            if excl_terms:
+                cat_names = [html.unescape(c.get("name") or "").lower()
+                             for c in (p.get("categories") or [])]
+                if any(t in cn for cn in cat_names for t in excl_terms):
+                    continue
+            if req_attr_name and not _attr_allows(p, req_attr_name, req_attr_value):
+                continue
             prices = p.get("prices") or {}
             items.append(make_item(
                 site, p.get("id"), name,
@@ -263,6 +312,20 @@ def fetch_woocommerce(site: dict, session: requests.Session) -> list[dict]:
         if page > 50:  # safety stop
             break
     return items
+
+
+def _attr_allows(product: dict, attr_name: str, attr_value: str) -> bool:
+    """True unless the product HAS the attribute and it lacks the value.
+
+    A missing attribute passes: shops commonly omit e.g. a "Sprache" attribute
+    on items that only exist in one language.
+    """
+    for a in product.get("attributes") or []:
+        if html.unescape(a.get("name") or "").lower() != attr_name:
+            continue
+        return any(attr_value in html.unescape(t.get("name") or "").lower()
+                   for t in (a.get("terms") or []))
+    return True
 
 
 def _woo_price(prices: dict) -> str:
@@ -570,14 +633,25 @@ def notify_all(messages: list[str], recipients: list[dict], telegram: dict | Non
 # Main
 # --------------------------------------------------------------------------- #
 
-def run_cycle(sites, recipients, telegram, session, verbose: bool) -> int | None:
+def run_cycle(sites, recipients, telegram, session, verbose: bool,
+              site_clock: dict[str, float] | None = None) -> int | None:
     """One poll of every site: fetch, diff against state, send alerts, save.
 
-    Returns the number of alerts sent, or None if every site failed to fetch
-    (state is left untouched in that case).
+    site_clock (loop mode) throttles sites with "min_poll_seconds": a site is
+    skipped until its next due time; skipped sites simply keep their previous
+    state. Returns the number of alerts sent, or None if every site failed to
+    fetch (state is left untouched in that case).
     """
     curr: dict[str, dict] = {}
     for site in sites:
+        if site_clock is not None:
+            if time.monotonic() < site_clock.get(site["id"], 0.0):
+                continue
+            min_poll = float(site.get("min_poll_seconds") or 0)
+            if min_poll > 0:
+                # Set before fetching so a failing site is throttled too
+                # (hammering a WAF that just 403'd us makes things worse).
+                site_clock[site["id"]] = time.monotonic() + min_poll
         try:
             items = fetch_site(site, session)
             curr.update({it["key"]: it for it in items})
@@ -662,12 +736,13 @@ def main() -> int:
     print(f"Loop mode: polling every {poll_seconds}s for up to {max_minutes:.0f} min.")
 
     cycle = 0
+    site_clock: dict[str, float] = {}
     while True:
         cycle += 1
         started = time.monotonic()
         try:
             sent = run_cycle(sites, recipients, telegram, session,
-                             verbose=(cycle == 1))
+                             verbose=(cycle == 1), site_clock=site_clock)
             # Log the first cycle, every alert, and a heartbeat every ~10 min
             # so the Actions log shows the loop is alive without being spammy.
             if cycle == 1 or sent or cycle % 20 == 0:
