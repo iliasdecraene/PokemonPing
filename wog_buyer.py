@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""
+wog.ch auto-buyer
+=================
+
+Companion to notifier.py. When the notifier detects a *target* Pokémon product
+on wog.ch (by default the "30th Celebration" English set), this logs into your
+wog account, drops the item in your cart, and — in full-auto mode — places the
+order on invoice ("Kauf auf Rechnung"), all in a couple of seconds.
+
+WHY THIS IS POSSIBLE (recon findings, endpoints wog's own site uses):
+  * Login:       POST /index.cfm/authenticate   (userName, password, csrfToken,
+                 relocate=true) — NO reCAPTCHA on the login form.
+  * Add to cart: POST /index.cfm/ajax.putIntoCart (productID, quantity,
+                 csrfToken) — NO captcha; returns JSON {STATUS, MESSAGE, ...}.
+  * The productID comes free from the detection feed; the csrfToken is printed
+    in each product page's HTML.
+  * The final checkout confirm (address -> Rechnung -> place order) sits behind
+    your login and is mapped ON the VPS by dump_checkout() the first time, which
+    walks up to — never through — the confirm button. Until that's wired,
+    full-auto stops at "in your cart" and pings you to tap Pay.
+
+SECRETS COME ONLY FROM ENV VARS — nothing here is committed:
+  WOG_USERNAME, WOG_PASSWORD          your wog.ch login (set on the VPS only)
+  WOG_BUY_ENABLED=1                   master switch. Unset/0 => DRY RUN (never
+                                      touches the cart, only logs/pings).
+  WOG_BUY_MODE=cart|auto              cart (default): add-to-cart + ping you to
+                                      confirm. auto: also place the invoice order.
+  WOG_BUY_KEYWORDS=30th,celebration   title must contain one (comma list, ANY).
+  WOG_BUY_LANG_MARKER=-EN-            seriesName/name must contain this.
+  WOG_BUY_MAX_PRICE=300               per-item CHF ceiling (hard safety stop).
+  WOG_BUY_LEDGER=bought.json          one-order-per-product ledger file.
+
+This file is import-safe: importing it does nothing. Run it directly for the
+self-tests / recon (see the __main__ block).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+import requests
+
+WOG_HOST = "https://www.wog.ch"
+WOG_BASE = f"{WOG_HOST}/en/index.cfm"
+
+
+# --------------------------------------------------------------------------- #
+# Purchase guard — decides IF an item may be bought. Pure logic, fully testable.
+# --------------------------------------------------------------------------- #
+
+class BuyGuard:
+    """Whitelist + price cap + one-order-per-product ledger.
+
+    Deliberately conservative: an item is bought only if it matches EVERY rule.
+    The ledger makes a repeat detection of the same product a no-op forever, so
+    a flaky feed can never trigger a second order.
+    """
+
+    def __init__(self, keywords, lang_marker, max_price_chf, ledger_path):
+        self.keywords = [k.strip().lower() for k in keywords if k.strip()]
+        self.lang_marker = (lang_marker or "").lower()
+        self.max_price_chf = float(max_price_chf)
+        self.ledger_path = Path(ledger_path)
+
+    # -- ledger ------------------------------------------------------------- #
+    def _load(self) -> dict:
+        try:
+            return json.loads(self.ledger_path.read_text("utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def already_bought(self, key: str) -> bool:
+        return key in self._load()
+
+    def record(self, key: str, info: dict) -> None:
+        led = self._load()
+        led[key] = info
+        self.ledger_path.write_text(json.dumps(led, indent=2), "utf-8")
+
+    # -- decision ----------------------------------------------------------- #
+    def wants(self, item: dict) -> tuple[bool, str]:
+        """Return (ok_to_buy, reason). reason explains a *rejection* or 'match'."""
+        hay = f"{item.get('name', '')} {item.get('series', '')}".lower()
+
+        if self.keywords and not any(k in hay for k in self.keywords):
+            return False, f"no keyword {self.keywords} in title"
+        if self.lang_marker and self.lang_marker not in hay:
+            return False, f"lang marker {self.lang_marker!r} absent"
+        if not item.get("in_stock", False):
+            return False, "not in stock / not orderable yet"
+
+        price = _parse_price(item.get("price", ""))
+        if price is None:
+            return False, "no parseable price (refusing to buy blind)"
+        if price > self.max_price_chf:
+            return False, f"price CHF {price:.2f} over cap CHF {self.max_price_chf:.2f}"
+
+        if self.already_bought(item.get("key", "")):
+            return False, "already ordered (ledger)"
+
+        return True, f"match (CHF {price:.2f})"
+
+
+def _parse_price(price: str):
+    """'CHF 179.90' / '179,90' -> 179.9; unparseable -> None."""
+    if not price:
+        return None
+    m = re.search(r"(\d+(?:[.,]\d{1,2})?)", str(price).replace("'", ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# wog client — the actual HTTP flow against confirmed endpoints.
+# --------------------------------------------------------------------------- #
+
+class CheckoutNotConfigured(RuntimeError):
+    """Raised until the logged-in checkout flow is mapped on the VPS."""
+
+
+class WogClient:
+    def __init__(self, username: str, password: str, session: requests.Session | None = None):
+        self.username = username
+        self.password = password
+        self.session = session or requests.Session()
+        self.session.headers.setdefault(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        )
+        self.logged_in = False
+
+    # -- csrf --------------------------------------------------------------- #
+    @staticmethod
+    def _extract_csrf(html_text: str) -> str:
+        # Product pages print it as inline JS: var csrfToken = "ABC123..."
+        m = re.search(r'csrfToken\s*=\s*"([0-9A-Fa-f]{16,})"', html_text)
+        if m:
+            return m.group(1)
+        # Forms carry it as a hidden input.
+        m = re.search(r'name="csrfToken"\s+value="([0-9A-Fa-f]{16,})"', html_text)
+        if m:
+            return m.group(1)
+        raise RuntimeError("csrfToken not found in page")
+
+    # -- login -------------------------------------------------------------- #
+    def login(self) -> bool:
+        page = self.session.get(f"{WOG_BASE}/login", timeout=30)
+        page.raise_for_status()
+        csrf = self._extract_csrf(page.text)
+        resp = self.session.post(
+            f"{WOG_BASE}/authenticate",
+            data={
+                "userName": self.username,
+                "password": self.password,
+                "csrfToken": csrf,
+                "relocate": "true",
+                "rememberMe": "true",
+            },
+            timeout=30,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+        # A logged-in session no longer shows the login button; the account/logout
+        # link appears instead. Confirm by hitting myAccount.
+        acct = self.session.get(f"{WOG_BASE}/myAccount", timeout=30)
+        self.logged_in = "authenticate" not in acct.url and (
+            "logout" in acct.text.lower() or "myaccount" in acct.url.lower()
+        )
+        return self.logged_in
+
+    # -- cart --------------------------------------------------------------- #
+    def add_to_cart(self, product_id, quantity: int = 1, product_url: str | None = None) -> dict:
+        """POST ajax.putIntoCart. Needs a fresh csrfToken from the product page."""
+        if product_url and product_url.startswith("http"):
+            url = product_url
+        elif product_url and product_url.startswith("/"):
+            url = WOG_HOST + product_url
+        else:
+            url = f"{WOG_BASE}/details/product/{product_id}"
+        pg = self.session.get(url, timeout=30)
+        pg.raise_for_status()
+        csrf = self._extract_csrf(pg.text)
+
+        resp = self.session.post(
+            f"{WOG_HOST}/index.cfm/ajax.putIntoCart",
+            data={"productID": str(product_id), "quantity": int(quantity), "csrfToken": csrf},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {"STATUS": -1, "MESSAGE": "non-JSON response", "_raw": resp.text[:200]}
+        return {
+            "ok": int(data.get("STATUS", -1)) > 0,
+            "message": data.get("MESSAGE", ""),
+            "cart_count": data.get("SHOPPINGCARTITEMCOUNT"),
+            "raw": data,
+        }
+
+    # -- checkout (mapped on the VPS, safely) ------------------------------- #
+    def dump_checkout(self, out_dir: str) -> list[str]:
+        """SAFE recon: fetch the cart + checkout pages and dump every <form>.
+
+        Walks toward the order page but NEVER submits the final confirm. Run this
+        once on the VPS (logged in, with a target item in the cart) so the final
+        place_order_invoice() step can be wired to the real payment/confirm form.
+        """
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        written = []
+        for name, url in [
+            ("basket", f"{WOG_BASE}/basket"),
+            ("cart", f"{WOG_BASE}/cart"),
+            ("checkout", f"{WOG_BASE}/checkout"),
+            ("order", f"{WOG_BASE}/order"),
+            ("myAccount", f"{WOG_BASE}/myAccount"),
+        ]:
+            try:
+                r = self.session.get(url, timeout=30)
+                p = out / f"checkout_{name}.html"
+                p.write_text(r.text, "utf-8")
+                forms = re.findall(r"<form[^>]*>", r.text, re.I)
+                written.append(f"{name}: HTTP {r.status_code}, {len(forms)} form(s) -> {p}")
+            except requests.RequestException as e:
+                written.append(f"{name}: ERROR {e}")
+        return written
+
+    def place_order_invoice(self, confirm: bool = False) -> dict:
+        raise CheckoutNotConfigured(
+            "Checkout confirm not yet mapped. Run dump_checkout() on the VPS "
+            "(logged in, item in cart) and share checkout_*.html so the invoice "
+            "confirm step can be wired. Until then, use MODE=cart."
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Orchestration — called by the notifier when a matching alert fires.
+# --------------------------------------------------------------------------- #
+
+def buyer_config_from_env() -> dict:
+    return {
+        "username": os.environ.get("WOG_USERNAME", ""),
+        "password": os.environ.get("WOG_PASSWORD", ""),
+        "enabled": os.environ.get("WOG_BUY_ENABLED", "") in ("1", "true", "yes", "on"),
+        "mode": (os.environ.get("WOG_BUY_MODE") or "cart").lower(),
+        "keywords": (os.environ.get("WOG_BUY_KEYWORDS") or "30th,celebration").split(","),
+        "lang_marker": os.environ.get("WOG_BUY_LANG_MARKER", "-EN-"),
+        "max_price": os.environ.get("WOG_BUY_MAX_PRICE", "300"),
+        "ledger": os.environ.get("WOG_BUY_LEDGER", "bought.json"),
+    }
+
+
+def consider_purchase(item: dict, cfg: dict, notify) -> str | None:
+    """Decide + act on one detected wog item. `notify` is a callable(str)->None
+    used for the Telegram receipt. Returns a short status string (or None if the
+    item didn't match). NEVER raises out — a buy failure must not crash polling.
+    """
+    if not str(item.get("key", "")).startswith("wog:"):
+        return None
+
+    guard = BuyGuard(cfg["keywords"], cfg["lang_marker"], cfg["max_price"], cfg["ledger"])
+    ok, reason = guard.wants(item)
+    if not ok:
+        return f"skip ({reason})"
+
+    name = item.get("name", "?")
+    price = item.get("price", "?")
+    link = item.get("link", "")
+
+    # DRY RUN — enabled switch is off. Prove the match, touch nothing.
+    if not cfg["enabled"]:
+        notify(f"🧪 WOULD BUY (dry run): {name}\n{price}\n{link}\n"
+               f"Set WOG_BUY_ENABLED=1 to arm.")
+        return "dry-run would-buy"
+
+    if not cfg["username"] or not cfg["password"]:
+        notify(f"⚠️ Target found but no WOG_USERNAME/PASSWORD set: {name}\n{link}")
+        return "no credentials"
+
+    try:
+        client = WogClient(cfg["username"], cfg["password"])
+        if not client.login():
+            notify(f"⚠️ Target found but wog login FAILED: {name}\n{link}")
+            return "login failed"
+
+        pid = item["key"].split(":", 1)[1]
+        res = client.add_to_cart(pid, quantity=1, product_url=link or None)
+        if not res["ok"]:
+            notify(f"⚠️ Add-to-cart failed for {name}: {res['message']}\n{link}")
+            return f"add-to-cart failed: {res['message']}"
+
+        # Item is now reserved in your cart.
+        if cfg["mode"] != "auto":
+            notify(f"🛒 IN YOUR CART at wog: {name}\n{price}\n"
+                   f"Tap to pay now (invoice): {link}")
+            guard.record(item["key"], {"name": name, "price": price, "action": "cart"})
+            return "added to cart + pinged"
+
+        # Full-auto: try to place the invoice order.
+        try:
+            order = client.place_order_invoice(confirm=True)
+            notify(f"✅ ORDERED on invoice at wog: {name}\n{price}\n"
+                   f"Order: {order.get('order_id', '?')}\n{link}")
+            guard.record(item["key"], {"name": name, "price": price, "action": "ordered"})
+            return "ordered"
+        except CheckoutNotConfigured:
+            # Interim: leave it in the cart and ping, so nothing is lost.
+            notify(f"🛒 IN YOUR CART at wog (auto-checkout not yet wired): {name}\n"
+                   f"{price}\nTap to pay now: {link}")
+            guard.record(item["key"], {"name": name, "price": price, "action": "cart"})
+            return "added to cart (checkout pending recon)"
+    except Exception as e:  # never crash the poll loop
+        notify(f"⚠️ Buy attempt errored for {name}: {e}\n{link}")
+        return f"error: {e}"
+
+
+# --------------------------------------------------------------------------- #
+# CLI: self-tests (no creds) and live recon (needs creds, safe).
+# --------------------------------------------------------------------------- #
+
+def _self_test() -> None:
+    """Guard logic — runs offline, no network, no creds."""
+    tmp = Path(os.environ.get("TEMP", ".")) / "wog_ledger_test.json"
+    tmp.unlink(missing_ok=True)
+    g = BuyGuard(["30th", "celebration"], "-EN-", 300, tmp)
+
+    def item(**kw):
+        base = {"key": "wog:1", "name": "Pokemon 30th Celebration -EN- Booster",
+                "in_stock": True, "price": "CHF 179.90"}
+        base.update(kw)
+        return base
+
+    ok, why = g.wants(item()); assert ok, why
+    assert not g.wants(item(name="Pokemon Scarlet -EN-"))[0], "keyword gate"
+    assert not g.wants(item(name="Pokemon 30th Celebration -DE- Booster"))[0], "lang gate"
+    assert not g.wants(item(in_stock=False))[0], "stock gate"
+    assert not g.wants(item(price="CHF 999.00"))[0], "price cap"
+    assert not g.wants(item(price=""))[0], "no price => refuse"
+    assert _parse_price("CHF 1'299.90") == 1299.9, _parse_price("CHF 1'299.90")
+
+    g.record("wog:1", {"name": "x"})
+    assert g.already_bought("wog:1"), "ledger record"
+    assert not g.wants(item())[0], "already bought"
+    tmp.unlink(missing_ok=True)
+    print("wog_buyer self-test: ALL PASS")
+
+
+def _login_test() -> None:
+    cfg = buyer_config_from_env()
+    if not cfg["username"] or not cfg["password"]:
+        sys.exit("Set WOG_USERNAME and WOG_PASSWORD to run the login test.")
+    c = WogClient(cfg["username"], cfg["password"])
+    print("login:", "OK" if c.login() else "FAILED")
+
+
+def _recon_checkout() -> None:
+    """Login + add first arg product to cart + dump checkout pages (no confirm)."""
+    cfg = buyer_config_from_env()
+    if not cfg["username"] or not cfg["password"]:
+        sys.exit("Set WOG_USERNAME and WOG_PASSWORD first.")
+    c = WogClient(cfg["username"], cfg["password"])
+    if not c.login():
+        sys.exit("login failed")
+    print("logged in.")
+    if len(sys.argv) > 2:
+        pid = sys.argv[2]
+        print("add_to_cart:", c.add_to_cart(pid))
+    out = os.environ.get("RECON_OUT", "./checkout_dump")
+    for line in c.dump_checkout(out):
+        print("  ", line)
+    print(f"Checkout pages dumped to {out} — share the checkout_*.html to wire full-auto.")
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "self-test"
+    if cmd == "self-test":
+        _self_test()
+    elif cmd == "login-test":
+        _login_test()
+    elif cmd == "recon-checkout":
+        _recon_checkout()
+    else:
+        sys.exit(f"unknown command {cmd!r}; use: self-test | login-test | recon-checkout [productID]")

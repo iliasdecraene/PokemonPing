@@ -3,6 +3,13 @@ state.json
 config.local.json
 sites.local.json
 
+# wog auto-buyer — secrets, order ledger, and checkout recon dumps
+.env
+bought.json
+checkout_dump/
+checkout_*.html
+wog_app.min.js
+
 # Editor / tooling
 .claude/
 

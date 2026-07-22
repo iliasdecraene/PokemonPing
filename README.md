@@ -195,6 +195,50 @@ shows up in the WhatsApp message.
 
 ---
 
+## Auto-buyer (wog.ch) — optional, VPS only
+
+`wog_buyer.py` can log into your wog.ch account and **automatically grab a target
+product** (default: the "30th Celebration" English set) the instant the notifier
+spots it — beating the sold-out window. It uses the same endpoints wog's own site
+uses: `POST /authenticate` to log in and `POST /ajax.putIntoCart` to add to cart
+(both captcha-free); checkout is on invoice ("Kauf auf Rechnung").
+
+**This runs on a private box, never on GitHub Actions.** Your login must not go
+near a public repo, and the buyer is *inert unless a `WOG_BUY_*` env var is set* —
+so the public runner keeps doing detection-only, and a small VPS (~5 CHF/month)
+does the buying with fast polling.
+
+⚠️ **Honest caveats:** auto-purchasing is against wog's ToS (same as the scalper
+bots you're racing). Worst realistic case is a cancelled order or account ban —
+it's your account on the line. The buyer has hard safety rails: a keyword
+whitelist, a `WOG_BUY_MAX_PRICE` ceiling, and a one-order-per-product ledger
+(`bought.json`) so it can never double-buy. Every action sends you a Telegram
+receipt.
+
+**Modes** (`WOG_BUY_MODE`):
+- `cart` *(default, works today)* — adds the item to your cart and pings you a
+  link to tap **Pay**. The item is reserved in seconds; you confirm on your phone.
+- `auto` — also places the invoice order with no interaction. Enabled after a
+  **one-time checkout recon on the VPS**: with a target item in the cart, run
+  `python wog_buyer.py recon-checkout <productID>` (it walks up to — never
+  through — the confirm button and dumps `checkout_*.html`), then the final
+  confirm step gets wired to your account's real payment form.
+
+**Setup on the VPS:**
+```bash
+git clone https://github.com/<you>/PokemonPing.git && cd PokemonPing
+pip install -r requirements.txt
+cp .env.example .env      # fill in WOG_USERNAME/PASSWORD, Telegram, keep DRYRUN=1 at first
+python wog_buyer.py self-test          # offline sanity check
+set -a; . ./.env; set +a
+python wog_buyer.py login-test         # confirm the login works
+python notifier.py                     # runs detection + (dry-run) buyer in a loop
+```
+Once a dry run has pinged you a correct "🧪 WOULD BUY" for a real target, set
+`WOG_BUY_ENABLED=1` (and `WOG_BUY_MODE=auto` after the checkout recon) to arm it.
+
+---
+
 ## Testing locally (optional)
 
 ```bash

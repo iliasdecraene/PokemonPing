@@ -236,11 +236,15 @@ def load_telegram() -> dict | None:
 #   {key, label, name, in_stock, price, availability, link}
 
 
-def make_item(site, pid, name, in_stock, price, availability, link) -> dict:
+def make_item(site, pid, name, in_stock, price, availability, link, series="") -> dict:
     return {
         "key": f"{site['id']}:{pid}",
         "label": site["label"],
         "name": html.unescape((name or "").strip()),
+        # Raw series/language string (e.g. wog's seriesName keeps the "-EN-"
+        # marker that the display title strips). Used by the wog auto-buyer's
+        # language gate; harmless empty string elsewhere.
+        "series": html.unescape((series or "").strip()),
         "in_stock": bool(in_stock),
         "price": price or "",
         "availability": availability or "",
@@ -390,6 +394,7 @@ def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
                 price=(f"CHF {unit_price}" if unit_price else ""),
                 availability=delivery,
                 link=p.get("linkTo"),
+                series=match_value,   # seriesName — keeps the "-EN-" marker
             )
         if len(products) < max_rows:
             break
@@ -691,6 +696,26 @@ def run_cycle(sites, recipients, telegram, session, verbose: bool,
         notify_all([msg for _, msg in fresh], recipients, telegram)
     for eid, _ in fresh:
         recent[eid] = now_ts
+
+    # Auto-buy: act on fresh wog.ch targets (e.g. "30th Celebration -EN-").
+    # Inert unless a WOG_BUY_* env var is set, so this never runs on the public
+    # GitHub Actions runner — only on a private box that holds the credentials.
+    if fresh and (os.environ.get("WOG_BUY_ENABLED") or os.environ.get("WOG_BUY_DRYRUN")):
+        try:
+            import wog_buyer
+            cfg = wog_buyer.buyer_config_from_env()
+            for eid, _ in fresh:
+                key = eid.split(":", 1)[1]          # "new:wog:123" -> "wog:123"
+                item = curr.get(key)
+                if not item:
+                    continue
+                status = wog_buyer.consider_purchase(
+                    item, cfg, lambda t: notify_all([t], recipients, telegram)
+                )
+                if status:
+                    print(f"[autobuy] {key}: {status}")
+        except Exception as e:  # buyer must never crash the poll loop
+            print(f"[autobuy] ERROR: {e}")
 
     # Merge, never delete: an item missing from this cycle's fetch stays in
     # state. Deleting it would make a flaky-feed comeback look brand "new"
