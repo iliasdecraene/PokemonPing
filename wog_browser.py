@@ -20,6 +20,9 @@ Everything here is import-safe; nothing runs on import.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 WOG_HOST = "https://www.wog.ch"
 WOG_BASE = f"{WOG_HOST}/en/index.cfm"
 
@@ -56,7 +59,8 @@ def _to_pw_cookies(cookiejar) -> list[dict]:
 
 
 def place_order(cookiejar, expect_name: str | None = None, confirm: bool = False,
-                headless: bool = True, timeout_ms: int = 30000) -> dict:
+                headless: bool = True, timeout_ms: int = 30000,
+                debug_dir: str | None = None) -> dict:
     """Open cart.confirm in a browser (authenticated via the given cookies), and
     optionally click Confirm Order.
 
@@ -126,11 +130,29 @@ def place_order(cookiejar, expect_name: str | None = None, confirm: bool = False
                 page.wait_for_load_state("networkidle", timeout=timeout_ms)
             except Exception:
                 pass
+            # Give any post-submit redirect / async validation a moment.
+            try:
+                page.wait_for_timeout(2500)
+            except Exception:
+                pass
 
             after = (page.inner_text("body") or "")
             alow = after.lower()
             result["url"] = page.url
-            result["text"] = after[:400]
+            result["text"] = after[:1500]
+            # reCAPTCHA-specific signals worth flagging explicitly.
+            if re.search(r"(recaptcha|not a robot|verify you are human|captcha)", alow):
+                result["reason"] = "reCAPTCHA challenge/error on the page"
+
+            if debug_dir:
+                try:
+                    d = Path(debug_dir)
+                    d.mkdir(parents=True, exist_ok=True)
+                    page.screenshot(path=str(d / "confirm_after.png"), full_page=True)
+                    (d / "confirm_after.html").write_text(page.content(), "utf-8")
+                    result["debug"] = str(d)
+                except Exception:
+                    pass
 
             if any(s in alow for s in _OUT_OF_STOCK):
                 result["reason"] = "out-of-stock at confirm"
@@ -138,8 +160,8 @@ def place_order(cookiejar, expect_name: str | None = None, confirm: bool = False
                 result["ok"] = True
                 result["ordered"] = True
                 result["reason"] = "order placed"
-            else:
-                result["reason"] = "unknown result (see text/url) — likely reCAPTCHA/validation"
+            elif not result["reason"]:
+                result["reason"] = "unknown result (see text/url)"
             browser.close()
             return result
     except Exception as e:

@@ -597,6 +597,30 @@ def _find_orderable_product(client: "WogClient"):
     return None, None, None
 
 
+def _browser_order() -> None:
+    """Diagnostic: add one item and actually click Confirm Order in the browser,
+    printing the FULL result (url + page text) and saving a screenshot/html to
+    ./browser_debug so we can see what wog returned. Places a REAL order if it
+    succeeds. Usage: browser-order [productID]"""
+    import wog_browser
+    if not wog_browser.available():
+        sys.exit("playwright not installed.")
+    cfg = buyer_config_from_env()
+    c = WogClient(cfg["username"], cfg["password"])
+    if not c.login():
+        sys.exit("login failed")
+    pid = sys.argv[2] if len(sys.argv) > 2 else "51217"
+    r = c.add_to_cart(pid)
+    print(f"add_to_cart: ok={r['ok']} cart_count={r['cart_count']}")
+    if r["cart_count"] != 1:
+        sys.exit("cart is not exactly 1 item — empty it on wog and retry.")
+    res = wog_browser.place_order(c.session.cookies, confirm=True,
+                                  headless=cfg["headless"], debug_dir="./browser_debug")
+    print("\nRESULT:", {k: res.get(k) for k in ("ok", "ordered", "reason", "url", "debug")})
+    print("\n--- page text after Confirm (first 1500) ---")
+    print(res.get("text", ""))
+
+
 def _recon_remove() -> None:
     """Dump exactly how wog clears the cart: the clearCartForm, a single remove
     link, and the removeFromCart/clearCart JS. Read-only."""
@@ -854,6 +878,8 @@ if __name__ == "__main__":
         _browser_verify()
     elif cmd == "recon-remove":
         _recon_remove()
+    elif cmd == "browser-order":
+        _browser_order()
     else:
         sys.exit(f"unknown command {cmd!r}; use: self-test | login-test | "
                  f"recon-checkout [productID] | recon-trigger | recon-page [path] | "
