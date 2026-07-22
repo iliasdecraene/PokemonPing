@@ -539,6 +539,43 @@ def _find_orderable_product(client: "WogClient"):
     return None, None, None
 
 
+def _recon_trigger() -> None:
+    """Find what the JS-driven 'Checkout' button does (its raw tag + the JS that
+    wires it), so we can learn the real order-flow URL. Read-only."""
+    cfg = buyer_config_from_env()
+    if not cfg["username"] or not cfg["password"]:
+        sys.exit("Set WOG_USERNAME and WOG_PASSWORD first.")
+    c = WogClient(cfg["username"], cfg["password"])
+    if not c.login():
+        sys.exit("login failed")
+    print("logged in.")
+    cart = c.session.get(f"{WOG_BASE}/cart", timeout=30).text
+
+    print("\n--- raw Checkout/order controls on /cart ---")
+    for m in re.finditer(r'<(a|button)\b[^>]*>.*?</\1>', cart, re.I | re.S):
+        tag = m.group(0)
+        if re.search(r"checkout|bestell|zur kasse|order", tag, re.I) and "search" not in tag.lower():
+            print("  ", re.sub(r"\s+", " ", tag)[:400])
+
+    print("\n--- /cart inline JS mentioning checkout/order ---")
+    for s in re.finditer(r"<script[^>]*>(.*?)</script>", cart, re.I | re.S):
+        js = s.group(1)
+        for k in re.finditer(r".{0,70}(checkout|/order|orderProcess|orderprocess).{0,150}", js, re.I):
+            print("  ", re.sub(r"\s+", " ", k.group(0)).strip()[:240])
+
+    print("\n--- app.min.js checkout references ---")
+    try:
+        app = c.session.get("https://www.wog.ch/assets/dist/js/app.min.js", timeout=30).text
+        hits = 0
+        for k in re.finditer(r".{0,40}(checkout|index\.cfm/order|orderProcess).{0,140}", app, re.I):
+            print("  ", re.sub(r"\s+", " ", k.group(0)).strip()[:220])
+            hits += 1
+            if hits >= 25:
+                break
+    except requests.RequestException as e:
+        print("  app.min.js fetch error:", e)
+
+
 def _recon_checkout() -> None:
     """Login, put ONE in-stock item in the cart, and print the checkout report.
 
@@ -577,5 +614,8 @@ if __name__ == "__main__":
         _login_test()
     elif cmd == "recon-checkout":
         _recon_checkout()
+    elif cmd == "recon-trigger":
+        _recon_trigger()
     else:
-        sys.exit(f"unknown command {cmd!r}; use: self-test | login-test | recon-checkout [productID]")
+        sys.exit(f"unknown command {cmd!r}; use: self-test | login-test | "
+                 f"recon-checkout [productID] | recon-trigger")
