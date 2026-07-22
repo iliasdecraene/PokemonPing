@@ -215,6 +215,19 @@ whitelist, a `WOG_BUY_MAX_PRICE` ceiling, and a one-order-per-product ledger
 (`bought.json`) so it can never double-buy. Every action sends you a Telegram
 receipt.
 
+**Reply BUY (the normal control).** Every wog.ch alert on Telegram ends with
+"↩️ Reply BUY to grab this one". Reply **BUY** to that message and the bot buys
+*that exact product* — re-checked English-only and under your price cap — then
+replies with the result (`✅ Ordered`, `🛒 In your cart — tap to pay`, or
+`❌ likely sold out`). You stay in control and approve each purchase, but it's
+one tap. Active automatically whenever Telegram is set and buying is armed
+(`WOG_BUY_ENABLED=1`) or in dry-run (`WOG_BUY_DRYRUN=1`, where BUY just replies
+"would buy"). It reads replies via Telegram long-polling — no public URL needed.
+
+**Keyword full-auto (optional).** Set `WOG_AUTOBUY_KEYWORDS=1` to *also* buy any
+fresh wog item matching `WOG_BUY_KEYWORDS` with no reply needed — unattended.
+Off by default; reply-BUY is the recommended control.
+
 **Modes** (`WOG_BUY_MODE`):
 - `cart` *(default, works today)* — adds the item to your cart and pings you a
   link to tap **Pay**. The item is reserved in seconds; you confirm on your phone.

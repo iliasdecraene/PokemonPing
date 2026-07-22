@@ -327,6 +327,67 @@ def consider_purchase(item: dict, cfg: dict, notify) -> str | None:
         return f"error: {e}"
 
 
+def buy_target(target: dict, cfg: dict) -> str:
+    """Handle a manual 'BUY' reply for ONE specific wog item.
+
+    Unlike consider_purchase() (keyword auto-buy), this skips the keyword
+    whitelist — the user explicitly chose this item — but still enforces:
+    English-only (language marker), the price cap, and the one-order ledger.
+    Returns a short human-readable result string (sent back as the Telegram
+    reply). Never raises.
+    """
+    try:
+        name = target.get("name", "?")
+        link = target.get("link", "") or ""
+        hay = f"{name} {target.get('series', '')}".lower()
+
+        lang = (cfg.get("lang_marker") or "").lower()
+        if lang and lang not in hay:
+            return f"❌ Skipped — that isn't an English listing: {name}"
+
+        price = _parse_price(target.get("price", ""))
+        max_price = float(cfg["max_price"])
+        if price is not None and price > max_price:
+            return (f"❌ CHF {price:.2f} is over your safety cap of "
+                    f"CHF {max_price:.0f}.\nRaise WOG_BUY_MAX_PRICE to allow it.")
+
+        guard = BuyGuard(cfg["keywords"], cfg["lang_marker"], cfg["max_price"], cfg["ledger"])
+        key = target.get("key", "")
+        if guard.already_bought(key):
+            return f"ℹ️ Already handled earlier: {name}"
+
+        if not cfg["enabled"]:
+            return (f"🧪 Dry run — would buy: {name} ({target.get('price', '?')}).\n"
+                    f"Set WOG_BUY_ENABLED=1 on the server to arm real buying.")
+
+        if not cfg["username"] or not cfg["password"]:
+            return "⚠️ No WOG_USERNAME / WOG_PASSWORD set on the server."
+
+        client = WogClient(cfg["username"], cfg["password"])
+        if not client.login():
+            return "⚠️ wog login failed — check the credentials."
+
+        pid = key.split(":", 1)[1]
+        res = client.add_to_cart(pid, quantity=1, product_url=link or None)
+        if not res["ok"]:
+            return f"❌ Couldn't add to cart (likely just sold out): {res['message']}"
+
+        if cfg["mode"] == "auto":
+            try:
+                order = client.place_order_invoice(confirm=True)
+                guard.record(key, {"name": name, "price": target.get("price"), "action": "ordered"})
+                return f"✅ Ordered on invoice: {name}\nOrder {order.get('order_id', '?')}"
+            except CheckoutNotConfigured:
+                guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
+                return (f"🛒 Added to your cart: {name}\n"
+                        f"(auto-checkout not wired yet) Tap to pay: {link}")
+
+        guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
+        return f"🛒 In your cart: {name}\nTap to pay now: {link}"
+    except Exception as e:
+        return f"⚠️ Buy failed: {e}"
+
+
 # --------------------------------------------------------------------------- #
 # CLI: self-tests (no creds) and live recon (needs creds, safe).
 # --------------------------------------------------------------------------- #

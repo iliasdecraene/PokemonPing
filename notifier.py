@@ -639,7 +639,8 @@ def notify_all(messages: list[str], recipients: list[dict], telegram: dict | Non
 # --------------------------------------------------------------------------- #
 
 def run_cycle(sites, recipients, telegram, session, verbose: bool,
-              site_clock: dict[str, float] | None = None) -> int | None:
+              site_clock: dict[str, float] | None = None,
+              tg_controller=None) -> int | None:
     """One poll of every site: fetch, diff against state, send alerts, save.
 
     site_clock (loop mode) throttles sites with "min_poll_seconds": a site is
@@ -693,19 +694,35 @@ def run_cycle(sites, recipients, telegram, session, verbose: bool,
     if verbose or fresh:
         print(f"{len(fresh)} alert(s) to send.")
     if fresh:
-        notify_all([msg for _, msg in fresh], recipients, telegram)
+        if tg_controller is not None:
+            # Telegram goes through the controller so wog alerts carry a
+            # remembered message_id (=> you can reply BUY to them); CallMeBot
+            # still via notify_all. Passing telegram=None avoids a double send.
+            notify_all([msg for _, msg in fresh], recipients, telegram=None)
+            for eid, msg in fresh:
+                key = eid.split(":", 1)[1]           # "new:wog:123" -> "wog:123"
+                item = curr.get(key)
+                if item and key.startswith("wog:"):
+                    tg_controller.send(msg + "\n\n↩️ Reply BUY to grab this one "
+                                             "(English only).", buy_target=item)
+                else:
+                    tg_controller.send(msg)
+        else:
+            notify_all([msg for _, msg in fresh], recipients, telegram)
     for eid, _ in fresh:
         recent[eid] = now_ts
 
-    # Auto-buy: act on fresh wog.ch targets (e.g. "30th Celebration -EN-").
-    # Inert unless a WOG_BUY_* env var is set, so this never runs on the public
-    # GitHub Actions runner — only on a private box that holds the credentials.
-    if fresh and (os.environ.get("WOG_BUY_ENABLED") or os.environ.get("WOG_BUY_DRYRUN")):
+    # Keyword full-auto buy: unattended purchase of fresh wog targets (e.g.
+    # "30th Celebration -EN-"). OFF by default — reply-BUY is the normal control.
+    # Opt in with WOG_AUTOBUY_KEYWORDS=1. Inert without the WOG_BUY_* env, so it
+    # never runs on the public GitHub Actions runner.
+    if (fresh and os.environ.get("WOG_AUTOBUY_KEYWORDS")
+            and (os.environ.get("WOG_BUY_ENABLED") or os.environ.get("WOG_BUY_DRYRUN"))):
         try:
             import wog_buyer
             cfg = wog_buyer.buyer_config_from_env()
             for eid, _ in fresh:
-                key = eid.split(":", 1)[1]          # "new:wog:123" -> "wog:123"
+                key = eid.split(":", 1)[1]
                 item = curr.get(key)
                 if not item:
                     continue
@@ -747,6 +764,22 @@ def main() -> int:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
 
+    # Two-way Telegram (reply BUY to a wog alert) activates when Telegram is
+    # configured AND buying is armed/dry-run. Stays off on the public runner.
+    tg_controller = None
+    buy_active = bool(os.environ.get("WOG_BUY_ENABLED") or os.environ.get("WOG_BUY_DRYRUN"))
+    if telegram and buy_active:
+        import telegram_control
+        import wog_buyer
+        tg_controller = telegram_control.TelegramController(
+            telegram["token"], telegram["chat_ids"]
+        )
+
+        def _buy_handler(target):
+            return wog_buyer.buy_target(target, wog_buyer.buyer_config_from_env())
+
+        print("Reply-BUY active: reply BUY to a wog.ch alert to purchase it.")
+
     # POLL_SECONDS > 0 turns on loop mode: keep polling every POLL_SECONDS for
     # up to MAX_RUNTIME_MINUTES, then exit cleanly so the workflow's cron can
     # start a fresh job (GitHub kills jobs at 6h; we stop before that so the
@@ -754,7 +787,11 @@ def main() -> int:
     # is what you want for local testing.
     poll_seconds = int(os.environ.get("POLL_SECONDS", "0") or 0)
     if poll_seconds <= 0:
-        return 0 if run_cycle(sites, recipients, telegram, session, verbose=True) is not None else 1
+        result = run_cycle(sites, recipients, telegram, session, verbose=True,
+                           tg_controller=tg_controller)
+        if tg_controller is not None:
+            tg_controller.poll_replies(_buy_handler)
+        return 0 if result is not None else 1
 
     max_minutes = float(os.environ.get("MAX_RUNTIME_MINUTES", "345") or 345)
     deadline = time.monotonic() + max_minutes * 60
@@ -767,7 +804,11 @@ def main() -> int:
         started = time.monotonic()
         try:
             sent = run_cycle(sites, recipients, telegram, session,
-                             verbose=(cycle == 1), site_clock=site_clock)
+                             verbose=(cycle == 1), site_clock=site_clock,
+                             tg_controller=tg_controller)
+            # After polling shops, check Telegram for BUY replies and act on them.
+            if tg_controller is not None:
+                tg_controller.poll_replies(_buy_handler)
             # Log the first cycle, every alert, and a heartbeat every ~10 min
             # so the Actions log shows the loop is alive without being spammy.
             if cycle == 1 or sent or cycle % 20 == 0:

@@ -10,6 +10,9 @@ checkout_dump/
 checkout_*.html
 wog_app.min.js
 
+# Telegram controller runtime state (update offset + pending buy targets)
+telegram_state.json
+
 # Editor / tooling
 .claude/
 
