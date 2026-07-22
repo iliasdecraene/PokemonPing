@@ -493,9 +493,10 @@ def buy_target(target: dict, cfg: dict) -> str:
         if not client.login():
             return "⚠️ wog login failed — check the credentials."
 
-        # Empty the cart FIRST so the order can only ever contain this one item,
-        # then add the exact product the alert was for.
-        client.clear_cart()
+        # Add the exact product the alert was for. We rely on your cart being
+        # empty (you keep it that way); the count check below is the safety net —
+        # if the cart isn't exactly this one item, we refuse to auto-order so we
+        # can never sweep in leftover items.
         pid = key.split(":", 1)[1]
         res = client.add_to_cart(pid, quantity=1, product_url=link or None)
         if not res["ok"]:
@@ -503,10 +504,9 @@ def buy_target(target: dict, cfg: dict) -> str:
 
         count = res.get("cart_count")
         if count is not None and count != 1:
-            # Safety: refuse to hand over a confirm link if the cart isn't exactly
-            # this one item (clear didn't take). User can sort the cart manually.
-            return (f"⚠️ Added {name}, but the cart has {count} items — clear it and "
-                    f"retry, or check it here: {WOG_BASE}/cart")
+            return (f"⚠️ Added {name}, but your cart now has {count} items — I won't "
+                    f"auto-order, to avoid buying extras. Empty your cart and retry, "
+                    f"or finish manually: {WOG_BASE}/cart")
 
         guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
 
@@ -652,8 +652,7 @@ def _browser_verify() -> None:
     c = WogClient(cfg["username"], cfg["password"])
     if not c.login():
         sys.exit("login failed")
-    print("logged in.")
-    c.clear_cart()
+    print("logged in. (empty your cart on wog first for a clean 1-item check)")
     pid = sys.argv[2] if len(sys.argv) > 2 else "51217"
     r = c.add_to_cart(pid)
     print(f"add_to_cart: ok={r['ok']} cart_count={r['cart_count']} msg={r['message']!r}")
