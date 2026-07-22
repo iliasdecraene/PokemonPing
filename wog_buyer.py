@@ -557,21 +557,27 @@ def _recon_trigger() -> None:
         if re.search(r"checkout|bestell|zur kasse|order", tag, re.I) and "search" not in tag.lower():
             print("  ", re.sub(r"\s+", " ", tag)[:400])
 
-    print("\n--- /cart inline JS mentioning checkout/order ---")
+    print("\n--- /cart inline JS: orderProcess config + #address handler ---")
     for s in re.finditer(r"<script[^>]*>(.*?)</script>", cart, re.I | re.S):
         js = s.group(1)
-        for k in re.finditer(r".{0,70}(checkout|/order|orderProcess|orderprocess).{0,150}", js, re.I):
-            print("  ", re.sub(r"\s+", " ", k.group(0)).strip()[:240])
+        # The orderProcess step map (…: '1_Warenkorb', …) tells us the wizard URLs.
+        for k in re.finditer(r".{0,40}orderProcess.{0,400}", js, re.I):
+            print("  [orderProcess]", re.sub(r"\s+", " ", k.group(0)).strip()[:460])
+        # Anything binding the #address button / navigating on click.
+        for k in re.finditer(r".{0,60}(getElementById\(['\"]address|#address|['\"]address['\"]|location\.href|window\.location|\.href\s*=).{0,140}", js, re.I):
+            print("  [addr/nav]", re.sub(r"\s+", " ", k.group(0)).strip()[:240])
 
-    print("\n--- app.min.js checkout references ---")
+    print("\n--- app.min.js: address/orderProcess/navigation refs ---")
     try:
         app = c.session.get("https://www.wog.ch/assets/dist/js/app.min.js", timeout=30).text
         hits = 0
-        for k in re.finditer(r".{0,40}(checkout|index\.cfm/order|orderProcess).{0,140}", app, re.I):
+        for k in re.finditer(r".{0,50}(orderProcess|index\.cfm/order|getElementById\(.address.|Warenkorb|1_|2_|3_).{0,160}", app):
             print("  ", re.sub(r"\s+", " ", k.group(0)).strip()[:220])
             hits += 1
-            if hits >= 25:
+            if hits >= 30:
                 break
+        if not hits:
+            print("  (no matches in app.min.js — flow likely fully in inline JS above)")
     except requests.RequestException as e:
         print("  app.min.js fetch error:", e)
 
