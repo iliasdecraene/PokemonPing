@@ -539,6 +539,65 @@ def _find_orderable_product(client: "WogClient"):
     return None, None, None
 
 
+def _recon_page() -> None:
+    """GET one wog page (default cart.address) and dump its forms+fields, payment
+    inputs, Rechnung context, and next-step controls. Read-only — never POSTs.
+    Walk the wizard by passing the next path:  recon-page cart.address"""
+    cfg = buyer_config_from_env()
+    if not cfg["username"] or not cfg["password"]:
+        sys.exit("Set WOG_USERNAME and WOG_PASSWORD first.")
+    c = WogClient(cfg["username"], cfg["password"])
+    if not c.login():
+        sys.exit("login failed")
+    path = sys.argv[2] if len(sys.argv) > 2 else "cart.address"
+    url = path if path.startswith("http") else f"{WOG_BASE}/{path}"
+    r = c.session.get(url, timeout=30)
+    h = r.text
+    print(f"GET {url} -> HTTP {r.status_code}, {len(h)} bytes\n")
+
+    print("--- forms (action, method, field names) ---")
+    for fm in re.finditer(r"<form\b[^>]*>(.*?)</form>", h, re.I | re.S):
+        open_tag = fm.group(0)[:fm.group(0).find(">") + 1]
+        action = (re.search(r'action="([^"]*)"', open_tag) or [None, "?"])[1]
+        method = (re.search(r'method="([^"]*)"', open_tag) or [None, "?"])[1]
+        fid = (re.search(r'id="([^"]*)"', open_tag) or [None, ""])[1]
+        inner = fm.group(1)
+        names = sorted(set(re.findall(
+            r'<(?:input|select|textarea|button)[^>]*\bname="([^"]+)"', inner, re.I)))
+        if action and "search" in action.lower():
+            continue
+        print(f"  FORM id={fid} {method} -> {action}")
+        print(f"     fields: {names}")
+        for m in re.finditer(r"<input\b[^>]*>", inner, re.I):
+            if re.search(r"(payment|zahl|rechnung|invoice|vorkasse|twint|postfinance|paypal|kreditkarte)",
+                         m.group(0), re.I):
+                nm = (re.search(r'name="([^"]*)"', m.group(0)) or [None, ""])[1]
+                vl = (re.search(r'value="([^"]*)"', m.group(0)) or [None, ""])[1]
+                ty = (re.search(r'type="([^"]*)"', m.group(0)) or [None, ""])[1]
+                print(f"     PAY-INPUT type={ty} name={nm} value={vl}")
+
+    print("\n--- payment / Rechnung context ---")
+    shown = 0
+    for m in re.finditer(r"(kauf auf rechnung|rechnung|zahlungsart|payment method|vorkasse)", h, re.I):
+        print("  …", re.sub(r"\s+", " ", h[max(0, m.start() - 90):m.start() + 130]), "…")
+        shown += 1
+        if shown >= 6:
+            break
+
+    print("\n--- next-step controls (buttons / id-bearing / order-flow anchors) ---")
+    for a in re.finditer(r"<(a|button)\b[^>]*>(.*?)</\1>", h, re.I | re.S):
+        tag = a.group(0)
+        opentag = tag[:tag.find(">") + 1]
+        label = re.sub(r"<[^>]+>", "", a.group(2)).strip()
+        if re.search(r'id="(address|payment|confirm|order|checkout|submit)', opentag, re.I) \
+                or re.search(r"(cart\.|order\.|checkout|weiter|confirm|bestell|zahl|proceed)", opentag, re.I) \
+                or label.lower() in ("checkout", "continue", "next", "weiter", "confirm order",
+                                     "order", "place order", "bestellen", "pay", "buy"):
+            href = (re.search(r'href="([^"]*)"', opentag) or [None, ""])[1]
+            aid = (re.search(r'id="([^"]*)"', opentag) or [None, ""])[1]
+            print(f"  <{a.group(1)} id={aid} href={href}> '{label[:30]}'")
+
+
 def _recon_trigger() -> None:
     """Find what the JS-driven 'Checkout' button does (its raw tag + the JS that
     wires it), so we can learn the real order-flow URL. Read-only."""
@@ -621,6 +680,8 @@ if __name__ == "__main__":
         _recon_checkout()
     elif cmd == "recon-trigger":
         _recon_trigger()
+    elif cmd == "recon-page":
+        _recon_page()
     else:
         sys.exit(f"unknown command {cmd!r}; use: self-test | login-test | "
-                 f"recon-checkout [productID] | recon-trigger")
+                 f"recon-checkout [productID] | recon-trigger | recon-page [path]")
