@@ -369,6 +369,8 @@ def buyer_config_from_env() -> dict:
         "lang_marker": os.environ.get("WOG_BUY_LANG_MARKER", "-EN-"),
         "max_price": os.environ.get("WOG_BUY_MAX_PRICE", "300"),
         "ledger": os.environ.get("WOG_BUY_LEDGER", "bought.json"),
+        "autoconfirm": os.environ.get("WOG_BUY_AUTOCONFIRM", "") in ("1", "true", "yes", "on"),
+        "headless": os.environ.get("WOG_BROWSER_HEADLESS", "1") not in ("0", "false", "no"),
     }
 
 
@@ -382,6 +384,8 @@ def buyer_policy_from_env() -> dict:
         "keywords": (os.environ.get("WOG_BUY_KEYWORDS") or "30th,celebration").split(","),
         "lang_marker": os.environ.get("WOG_BUY_LANG_MARKER", "-EN-"),
         "max_price": os.environ.get("WOG_BUY_MAX_PRICE", "300"),
+        "autoconfirm": os.environ.get("WOG_BUY_AUTOCONFIRM", "") in ("1", "true", "yes", "on"),
+        "headless": os.environ.get("WOG_BROWSER_HEADLESS", "1") not in ("0", "false", "no"),
     }
 
 
@@ -505,6 +509,29 @@ def buy_target(target: dict, cfg: dict) -> str:
                     f"retry, or check it here: {WOG_BASE}/cart")
 
         guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
+
+        # Full-auto: let a headless browser click the final Confirm Order (needed
+        # because that step is behind reCAPTCHA). Falls back to the one-tap link on
+        # any problem, so nothing is ever lost.
+        if cfg.get("autoconfirm"):
+            try:
+                import wog_browser
+                if wog_browser.available():
+                    res = wog_browser.place_order(
+                        client.session.cookies, expect_name=name, confirm=True,
+                        headless=cfg.get("headless", True))
+                    if res.get("ordered"):
+                        guard.record(key, {"name": name, "price": target.get("price"),
+                                           "action": "ordered"})
+                        return f"✅ ORDERED on invoice: {name} · {target.get('price', '')}"
+                    # Didn't complete — hand back the one-tap link with the reason.
+                    return (f"⚠️ Auto-confirm didn't complete ({res.get('reason')}).\n"
+                            f"Item is in your cart — tap to finish: {WOG_BASE}/cart.confirm")
+                # playwright not installed — fall through to the link.
+            except Exception as e:
+                return (f"⚠️ Auto-confirm errored ({e}).\n"
+                        f"Item is in your cart — tap to finish: {WOG_BASE}/cart.confirm")
+
         # Cart is account-level, so this confirm link opens in YOUR browser with
         # the item, invoice payment, and terms pre-set — one tap on "Confirm Order"
         # (that final step runs Google reCAPTCHA, which needs your real browser).
@@ -568,6 +595,33 @@ def _find_orderable_product(client: "WogClient"):
     except (requests.RequestException, ValueError):
         pass
     return None, None, None
+
+
+def _browser_verify() -> None:
+    """Prove the headless-browser confirm path works WITHOUT ordering: log in,
+    clear cart, add a product, then open cart.confirm in the browser and report
+    what it sees (never clicks Confirm). Usage: browser-verify [productID]"""
+    import wog_browser
+    if not wog_browser.available():
+        sys.exit("playwright not installed. On the VPS run:\n"
+                 "  .venv/bin/pip install playwright && "
+                 ".venv/bin/playwright install --with-deps chromium")
+    cfg = buyer_config_from_env()
+    if not cfg["username"] or not cfg["password"]:
+        sys.exit("Set WOG_USERNAME and WOG_PASSWORD first.")
+    c = WogClient(cfg["username"], cfg["password"])
+    if not c.login():
+        sys.exit("login failed")
+    print("logged in.")
+    c.clear_cart()
+    pid = sys.argv[2] if len(sys.argv) > 2 else "51217"
+    r = c.add_to_cart(pid)
+    print(f"add_to_cart: ok={r['ok']} cart_count={r['cart_count']} msg={r['message']!r}")
+    res = wog_browser.place_order(c.session.cookies, confirm=False,
+                                  headless=cfg["headless"])
+    print("browser verify:", {k: res[k] for k in ("ok", "reason", "url")})
+    print("summary text (first 400):")
+    print(res.get("text", ""))
 
 
 def _try_buy() -> None:
@@ -757,7 +811,9 @@ if __name__ == "__main__":
         _recon_page()
     elif cmd == "try-buy":
         _try_buy()
+    elif cmd == "browser-verify":
+        _browser_verify()
     else:
         sys.exit(f"unknown command {cmd!r}; use: self-test | login-test | "
                  f"recon-checkout [productID] | recon-trigger | recon-page [path] | "
-                 f"try-buy <productID> [name]")
+                 f"try-buy <productID> [name] | browser-verify [productID]")
