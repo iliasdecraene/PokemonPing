@@ -614,6 +614,18 @@ def _recon_page() -> None:
         if shown >= 12:
             break
 
+    print("\n--- inline scripts: how the step submits (fetch/FormData/action/next) ---")
+    for s in re.finditer(r"<script[^>]*>(.*?)</script>", h, re.I | re.S):
+        js = s.group(1)
+        if re.search(r"(mana-btn|getSelectedPaymentMethod|FormData|fetch\(|\.submit\(|"
+                     r"cart\.(payment|confirm|order)|placeOrder|orderNow)", js, re.I):
+            flat = re.sub(r"\s+", " ", js).strip()
+            # Print windows around the interesting calls, not the whole 30k blob.
+            for m in re.finditer(r".{0,30}(fetch\(|FormData|\.submit\(|action|append\(|"
+                                 r"location|cart\.(payment|confirm|order)|mana-btn).{0,120}",
+                                 flat, re.I):
+                print("  JS:", m.group(0).strip()[:200])
+
 
 def _recon_trigger() -> None:
     """Find what the JS-driven 'Checkout' button does (its raw tag + the JS that
