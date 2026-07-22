@@ -597,6 +597,46 @@ def _find_orderable_product(client: "WogClient"):
     return None, None, None
 
 
+def _recon_remove() -> None:
+    """Dump exactly how wog clears the cart: the clearCartForm, a single remove
+    link, and the removeFromCart/clearCart JS. Read-only."""
+    cfg = buyer_config_from_env()
+    c = WogClient(cfg["username"], cfg["password"])
+    if not c.login():
+        sys.exit("login failed")
+    h = c.session.get(f"{WOG_BASE}/cart", timeout=30).text
+
+    print("--- clearCartForm (full) ---")
+    m = re.search(r'<form[^>]*id="clearCartForm"[^>]*>(.*?)</form>', h, re.I | re.S)
+    if m:
+        print(re.sub(r"\s+", " ", m.group(0))[:600])
+        for i in re.finditer(r"<input\b[^>]*>", m.group(1), re.I):
+            print("   input:", re.sub(r"\s+", " ", i.group(0)))
+    else:
+        print("  (clearCartForm not found)")
+
+    print("\n--- one remove-from-cart link (full tag) ---")
+    m = re.search(r'<a\b[^>]*cart\.remove[^>]*>', h, re.I)
+    if m:
+        print(re.sub(r"\s+", " ", m.group(0))[:400])
+
+    print("\n--- JS around removeFromCart / clearCart / removeAll / cart.remove ---")
+    for s in re.finditer(r"<script[^>]*>(.*?)</script>", h, re.I | re.S):
+        js = s.group(1)
+        for k in re.finditer(r".{0,40}(removeFromCart|clearCart|removeAll|cart\.remove|"
+                             r"initHeaderRemove).{0,180}", js, re.I):
+            print("  ", re.sub(r"\s+", " ", k.group(0)).strip()[:240])
+    # Also app.min.js definitions of these.
+    try:
+        app = c.session.get("https://www.wog.ch/assets/dist/js/app.min.js", timeout=30).text
+        for name in ("initHeaderRemoveFromCart", "removeFromCart", "clearCart"):
+            m = re.search(re.escape(name) + r"\s*[=:]\s*function[^{]*\{.{0,300}", app)
+            if m:
+                print(f"\n  [app.js {name}]", re.sub(r"\s+", " ", m.group(0))[:340])
+    except requests.RequestException:
+        pass
+
+
 def _browser_verify() -> None:
     """Prove the headless-browser confirm path works WITHOUT ordering: log in,
     clear cart, add a product, then open cart.confirm in the browser and report
@@ -813,6 +853,8 @@ if __name__ == "__main__":
         _try_buy()
     elif cmd == "browser-verify":
         _browser_verify()
+    elif cmd == "recon-remove":
+        _recon_remove()
     else:
         sys.exit(f"unknown command {cmd!r}; use: self-test | login-test | "
                  f"recon-checkout [productID] | recon-trigger | recon-page [path] | "
