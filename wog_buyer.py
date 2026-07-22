@@ -107,6 +107,14 @@ class BuyGuard:
         return True, f"match (CHF {price:.2f})"
 
 
+def _to_int(v):
+    """wog returns cart counts as floats (1.0). Coerce to int, or None."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_price(price: str):
     """'CHF 179.90' / '179,90' -> 179.9; unparseable -> None."""
     if not price:
@@ -206,9 +214,25 @@ class WogClient:
         return {
             "ok": int(data.get("STATUS", -1)) > 0,
             "message": data.get("MESSAGE", ""),
-            "cart_count": data.get("SHOPPINGCARTITEMCOUNT"),
+            "cart_count": _to_int(data.get("SHOPPINGCARTITEMCOUNT")),
             "raw": data,
         }
+
+    def clear_cart(self) -> bool:
+        """Empty the whole cart (POST cart.removeAll). Used before adding the one
+        target item so the order can only ever contain that item."""
+        pg = self.session.get(f"{WOG_BASE}/cart", timeout=30)
+        try:
+            csrf = self._extract_csrf(pg.text)
+        except RuntimeError:
+            return False
+        r = self.session.post(
+            f"{WOG_BASE}/cart.removeAll",
+            data={"csrfToken": csrf, "relocate": "true"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            timeout=30,
+        )
+        return r.status_code in (200, 302)
 
     # -- checkout recon (safe: reads pages, never confirms) ----------------- #
     # Anchors worth following forward through the checkout wizard...
@@ -465,21 +489,28 @@ def buy_target(target: dict, cfg: dict) -> str:
         if not client.login():
             return "⚠️ wog login failed — check the credentials."
 
+        # Empty the cart FIRST so the order can only ever contain this one item,
+        # then add the exact product the alert was for.
+        client.clear_cart()
         pid = key.split(":", 1)[1]
         res = client.add_to_cart(pid, quantity=1, product_url=link or None)
         if not res["ok"]:
             return f"❌ Couldn't add to cart (likely just sold out): {res['message']}"
 
-        # A manual BUY always tries to place the real order — the reply *is* the
-        # confirmation. Falls back to cart + pay-link only until checkout is wired.
-        try:
-            order = client.place_order_invoice(confirm=True)
-            guard.record(key, {"name": name, "price": target.get("price"), "action": "ordered"})
-            return f"✅ Ordered on invoice: {name}\nOrder {order.get('order_id', '?')}"
-        except CheckoutNotConfigured:
-            guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
-            return (f"🛒 Added to your cart: {name}\n"
-                    f"(one-tap ordering not wired yet — tap to pay) {link}")
+        count = res.get("cart_count")
+        if count is not None and count != 1:
+            # Safety: refuse to hand over a confirm link if the cart isn't exactly
+            # this one item (clear didn't take). User can sort the cart manually.
+            return (f"⚠️ Added {name}, but the cart has {count} items — clear it and "
+                    f"retry, or check it here: {WOG_BASE}/cart")
+
+        guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
+        # Cart is account-level, so this confirm link opens in YOUR browser with
+        # the item, invoice payment, and terms pre-set — one tap on "Confirm Order"
+        # (that final step runs Google reCAPTCHA, which needs your real browser).
+        return (f"🛒 Ready to order (invoice) — only this item is in your cart:\n"
+                f"{name} · {target.get('price', '')}\n"
+                f"👉 Tap to place the order: {WOG_BASE}/cart.confirm")
     except Exception as e:
         return f"⚠️ Buy failed: {e}"
 
