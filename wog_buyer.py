@@ -597,6 +597,23 @@ def _recon_page() -> None:
             aid = (re.search(r'id="([^"]*)"', opentag) or [None, ""])[1]
             print(f"  <{a.group(1)} id={aid} href={href}> '{label[:30]}'")
 
+    print("\n--- radio/checkbox inputs (payment selection often lives here) ---")
+    for m in re.finditer(r'<input\b[^>]*type="(radio|checkbox)"[^>]*>', h, re.I):
+        tag = m.group(0)
+        nm = (re.search(r'name="([^"]*)"', tag) or [None, ""])[1]
+        vl = (re.search(r'value="([^"]*)"', tag) or [None, ""])[1]
+        chk = "CHECKED" if re.search(r"\bchecked", tag, re.I) else ""
+        print(f"  {m.group(1)} name={nm} value={vl} {chk}")
+
+    print("\n--- raw around payment-method / rechnung / checked / cart.confirm ---")
+    shown = 0
+    for m in re.finditer(r"(payment-?method|paymentMethod|zahlart|kauf auf rechnung|"
+                         r"rechnung|invoice|\bchecked\b|cart\.confirm|setPayment)", h, re.I):
+        print("  …", re.sub(r"\s+", " ", h[max(0, m.start() - 110):m.start() + 160]), "…")
+        shown += 1
+        if shown >= 12:
+            break
+
 
 def _recon_trigger() -> None:
     """Find what the JS-driven 'Checkout' button does (its raw tag + the JS that
