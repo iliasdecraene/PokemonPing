@@ -288,6 +288,33 @@ class WogClient:
                     if full not in seen:
                         queue.append(full)
 
+            # Call-to-action controls: button-styled links and <button>s. These
+            # are usually the "proceed to checkout"/"order" triggers. Printed for
+            # every page (so we can SEE them); auto-followed only if clearly safe
+            # navigation. onclick/data-href reveal JS-driven navigation targets.
+            for a in re.finditer(r'<a\b[^>]*class="[^"]*button[^"]*"[^>]*>(.*?)</a>',
+                                 r.text, re.I | re.S):
+                tag = a.group(0)
+                href = (re.search(r'href="([^"]*)"', tag) or [None, ""])[1]
+                label = re.sub(r"<[^>]+>", "", a.group(1)).strip()
+                report.append(f"   CTA-LINK: '{label[:32]}' -> {href}")
+                blob = f"{href} {label}"
+                if href and "index.cfm" in href and self._NEXT.search(blob) and not self._DANGER.search(blob):
+                    full = href if href.startswith("http") else WOG_HOST + href
+                    if full not in seen:
+                        queue.append(full)
+            for b in re.finditer(r"<button\b[^>]*>(.*?)</button>", r.text, re.I | re.S):
+                tag = b.group(0)
+                label = re.sub(r"<[^>]+>", "", b.group(1)).strip()
+                extras = []
+                for attr in ("onclick", "data-href", "data-url", "formaction", "name"):
+                    mv = re.search(rf'{attr}="([^"]*)"', tag)
+                    if mv:
+                        extras.append(f"{attr}={mv.group(1)[:70]}")
+                if label or extras:
+                    report.append(f"   BUTTON: '{label[:32]}'"
+                                  + (("  " + " ".join(extras)) if extras else ""))
+
             if out and r.status_code == 200:
                 (out / f"page_{page_no}.html").write_text(r.text, "utf-8")
         return report
