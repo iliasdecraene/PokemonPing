@@ -551,11 +551,17 @@ def _recon_trigger() -> None:
     print("logged in.")
     cart = c.session.get(f"{WOG_BASE}/cart", timeout=30).text
 
-    print("\n--- raw Checkout/order controls on /cart ---")
-    for m in re.finditer(r'<(a|button)\b[^>]*>.*?</\1>', cart, re.I | re.S):
-        tag = m.group(0)
-        if re.search(r"checkout|bestell|zur kasse|order", tag, re.I) and "search" not in tag.lower():
-            print("  ", re.sub(r"\s+", " ", tag)[:400])
+    print("\n--- raw HTML around id=\"address\" (the Checkout control) ---")
+    for m in re.finditer(r'id="address"', cart):
+        chunk = cart[max(0, m.start() - 250):m.start() + 500]
+        print(re.sub(r"\s+", " ", chunk))
+        print("   ......")
+    # Any anchor whose href points into an order/checkout flow.
+    print("\n--- anchors with order/checkout hrefs ---")
+    for a in re.finditer(r'<a\b[^>]*href="([^"]*index\.cfm/[^"]*)"[^>]*>', cart, re.I):
+        if re.search(r"(order|checkout|kasse|bestell|address|payment|zahl)", a.group(1), re.I) \
+                and not re.search(r"(myOrder|orderHistory|orderCancel)", a.group(1), re.I):
+            print("  ", a.group(1))
 
     print("\n--- /cart inline JS: orderProcess config + #address handler ---")
     for s in re.finditer(r"<script[^>]*>(.*?)</script>", cart, re.I | re.S):
@@ -567,19 +573,12 @@ def _recon_trigger() -> None:
         for k in re.finditer(r".{0,60}(getElementById\(['\"]address|#address|['\"]address['\"]|location\.href|window\.location|\.href\s*=).{0,140}", js, re.I):
             print("  [addr/nav]", re.sub(r"\s+", " ", k.group(0)).strip()[:240])
 
-    print("\n--- app.min.js: address/orderProcess/navigation refs ---")
-    try:
-        app = c.session.get("https://www.wog.ch/assets/dist/js/app.min.js", timeout=30).text
-        hits = 0
-        for k in re.finditer(r".{0,50}(orderProcess|index\.cfm/order|getElementById\(.address.|Warenkorb|1_|2_|3_).{0,160}", app):
-            print("  ", re.sub(r"\s+", " ", k.group(0)).strip()[:220])
-            hits += 1
-            if hits >= 30:
-                break
-        if not hits:
-            print("  (no matches in app.min.js — flow likely fully in inline JS above)")
-    except requests.RequestException as e:
-        print("  app.min.js fetch error:", e)
+    print("\n--- full inline <script> blocks that mention #address or orderProcess ---")
+    for s in re.finditer(r"<script[^>]*>(.*?)</script>", cart, re.I | re.S):
+        js = s.group(1)
+        if re.search(r"#address|orderProcess|window\.location", js, re.I):
+            print("  ", re.sub(r"\s+", " ", js).strip()[:900])
+            print("   ------")
 
 
 def _recon_checkout() -> None:
