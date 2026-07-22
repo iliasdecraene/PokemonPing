@@ -523,7 +523,8 @@ def _recon_checkout() -> None:
         sys.exit("Couldn't find an in-stock product to add — pass a productID: "
                  "wog_buyer.py recon-checkout <productID>")
     print(f"using product {pid}  {title}")
-    print("add_to_cart:", c.add_to_cart(pid, product_url=(WOG_HOST + link) if link else None))
+    # add_to_cart normalizes absolute or relative links itself — pass as-is.
+    print("add_to_cart:", c.add_to_cart(pid, product_url=link or None))
 
     print("\n----- CHECKOUT REPORT (paste all of this back) -----")
     for line in c.inspect_checkout(os.environ.get("RECON_OUT")):
