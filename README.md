@@ -220,9 +220,20 @@ receipt.
 *that exact product* — re-checked English-only and under your price cap — then
 replies with the result (`✅ Ordered`, `🛒 In your cart — tap to pay`, or
 `❌ likely sold out`). You stay in control and approve each purchase, but it's
-one tap. Active automatically whenever Telegram is set and buying is armed
-(`WOG_BUY_ENABLED=1`) or in dry-run (`WOG_BUY_DRYRUN=1`, where BUY just replies
-"would buy"). It reads replies via Telegram long-polling — no public URL needed.
+one tap. It reads replies via Telegram long-polling — no public URL needed.
+
+**Per-person, group-safe.** Authorization is by the **sender's Telegram user
+ID**, not the chat — so you can run this in a group and only whitelisted people
+can buy, each **with their own wog account**. Configure buyers one of two ways:
+- *Just you:* set `WOG_OWNER_TELEGRAM_ID` (your personal Telegram id from
+  [@userinfobot](https://t.me/userinfobot) — the positive number, not the group
+  chat id) plus `WOG_USERNAME`/`WOG_PASSWORD` in `.env`.
+- *You + friends:* create `buyers.json` (copy `buyers.json.example`) with one
+  entry per person — their Telegram id and their own wog login. It's git-ignored.
+
+Each buyer gets their own order ledger, and a BUY from anyone not on the list is
+refused with a note showing their id (so you can add them). Real buying happens
+only when armed (`WOG_BUY_ENABLED=1`); otherwise BUY just replies "would buy".
 
 **Keyword full-auto (optional).** Set `WOG_AUTOBUY_KEYWORDS=1` to *also* buy any
 fresh wog item matching `WOG_BUY_KEYWORDS` with no reply needed — unattended.

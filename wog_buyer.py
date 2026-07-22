@@ -263,6 +263,19 @@ def buyer_config_from_env() -> dict:
     }
 
 
+def buyer_policy_from_env() -> dict:
+    """Global buy *policy* (no credentials). Per-person credentials + ledger are
+    filled in by the caller from the matched buyer, so several people can each
+    buy with their own wog account under the same price cap / language rules."""
+    return {
+        "enabled": os.environ.get("WOG_BUY_ENABLED", "") in ("1", "true", "yes", "on"),
+        "mode": (os.environ.get("WOG_BUY_MODE") or "cart").lower(),
+        "keywords": (os.environ.get("WOG_BUY_KEYWORDS") or "30th,celebration").split(","),
+        "lang_marker": os.environ.get("WOG_BUY_LANG_MARKER", "-EN-"),
+        "max_price": os.environ.get("WOG_BUY_MAX_PRICE", "300"),
+    }
+
+
 def consider_purchase(item: dict, cfg: dict, notify) -> str | None:
     """Decide + act on one detected wog item. `notify` is a callable(str)->None
     used for the Telegram receipt. Returns a short status string (or None if the
@@ -372,18 +385,16 @@ def buy_target(target: dict, cfg: dict) -> str:
         if not res["ok"]:
             return f"❌ Couldn't add to cart (likely just sold out): {res['message']}"
 
-        if cfg["mode"] == "auto":
-            try:
-                order = client.place_order_invoice(confirm=True)
-                guard.record(key, {"name": name, "price": target.get("price"), "action": "ordered"})
-                return f"✅ Ordered on invoice: {name}\nOrder {order.get('order_id', '?')}"
-            except CheckoutNotConfigured:
-                guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
-                return (f"🛒 Added to your cart: {name}\n"
-                        f"(auto-checkout not wired yet) Tap to pay: {link}")
-
-        guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
-        return f"🛒 In your cart: {name}\nTap to pay now: {link}"
+        # A manual BUY always tries to place the real order — the reply *is* the
+        # confirmation. Falls back to cart + pay-link only until checkout is wired.
+        try:
+            order = client.place_order_invoice(confirm=True)
+            guard.record(key, {"name": name, "price": target.get("price"), "action": "ordered"})
+            return f"✅ Ordered on invoice: {name}\nOrder {order.get('order_id', '?')}"
+        except CheckoutNotConfigured:
+            guard.record(key, {"name": name, "price": target.get("price"), "action": "cart"})
+            return (f"🛒 Added to your cart: {name}\n"
+                    f"(one-tap ordering not wired yet — tap to pay) {link}")
     except Exception as e:
         return f"⚠️ Buy failed: {e}"
 

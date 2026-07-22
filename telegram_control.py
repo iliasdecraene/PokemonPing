@@ -31,10 +31,14 @@ BUY_WORDS = {"buy", "buy it", "🟢", "yes buy"}
 
 
 class TelegramController:
-    def __init__(self, token: str, chat_ids, state_path="telegram_state.json",
-                 target_ttl_seconds: int = 86400):
+    def __init__(self, token: str, chat_ids, authorized=None,
+                 state_path="telegram_state.json", target_ttl_seconds: int = 86400):
         self.token = str(token)
         self.chat_ids = [str(c) for c in chat_ids]
+        # {str(telegram_user_id): buyer_dict}. Only these people may trigger a
+        # BUY, and each buys with THEIR own credentials (buyer_dict). Authorizing
+        # by *sender* — not by chat — is what makes group chats safe.
+        self.authorized = {str(k): v for k, v in (authorized or {}).items()}
         self.state_path = Path(state_path)
         self.target_ttl = int(target_ttl_seconds)
         self.api = f"https://api.telegram.org/bot{self.token}"
@@ -128,15 +132,25 @@ class TelegramController:
                 continue  # ignore anything not from a configured chat
             if (msg.get("text") or "").strip().lower() not in BUY_WORDS:
                 continue
+            # Authorize by the *sender*, not the chat: in a group everyone shares
+            # the chat id, so only a whitelisted user id may buy.
+            from_id = str((msg.get("from") or {}).get("id", ""))
+            buyer = self.authorized.get(from_id)
+            if buyer is None:
+                self.reply(chat_id, msg.get("message_id"),
+                           "🔒 You're not set up to buy. Ask the owner to add your "
+                           f"Telegram ID ({from_id}) to the buyers list.")
+                continue
             rid = (msg.get("reply_to_message") or {}).get("message_id")
             target = st["targets"].get(f"{chat_id}:{rid}") if rid is not None else None
             if not target:
                 self.reply(chat_id, msg.get("message_id"),
                            "↩️ To buy, reply BUY *to a wog.ch alert message*.")
                 continue
-            print(f"[buy] BUY reply for {target.get('key')} ({target.get('name')})")
+            print(f"[buy] BUY from {buyer.get('name', from_id)} for "
+                  f"{target.get('key')} ({target.get('name')})")
             try:
-                result = handler(target) or "(no result)"
+                result = handler(target, buyer) or "(no result)"
             except Exception as e:  # a buy must never crash the loop
                 result = f"⚠️ Buy handler error: {e}"
             self.reply(chat_id, msg.get("message_id"), result)

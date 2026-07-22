@@ -189,6 +189,41 @@ def load_recipients() -> list[dict]:
     return recipients
 
 
+def load_buyers() -> list[dict]:
+    """Who may reply BUY, and with which wog account. Each entry:
+        {"telegram_user_id": "123", "name": "Ilias",
+         "username": "wog_login", "password": "wog_pass"}
+
+    Source order: WOG_BUYERS env (JSON array) → buyers.json file → a single
+    owner synthesised from WOG_OWNER_TELEGRAM_ID + WOG_USERNAME/WOG_PASSWORD
+    (the simple one-person case). Entries missing an id/username/password are
+    dropped. Secrets, so buyers.json is git-ignored — never commit real logins.
+    """
+    raw = os.environ.get("WOG_BUYERS")
+    if not raw:
+        p = Path("buyers.json")
+        if p.exists():
+            raw = p.read_text(encoding="utf-8")
+    buyers: list[dict] = []
+    if raw:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        buyers = parsed if isinstance(parsed, list) else []
+    if not buyers:
+        owner = os.environ.get("WOG_OWNER_TELEGRAM_ID")
+        user = os.environ.get("WOG_USERNAME")
+        pw = os.environ.get("WOG_PASSWORD")
+        if owner and user and pw:
+            buyers = [{"telegram_user_id": owner, "name": "owner",
+                       "username": user, "password": pw}]
+    clean = []
+    for b in buyers:
+        b = dict(b)
+        b["telegram_user_id"] = str(b.get("telegram_user_id", "")).strip()
+        if b["telegram_user_id"] and b.get("username") and b.get("password"):
+            clean.append(b)
+    return clean
+
+
 def load_telegram() -> dict | None:
     """
     Telegram config:
@@ -765,20 +800,30 @@ def main() -> int:
     session.headers.update({"User-Agent": USER_AGENT})
 
     # Two-way Telegram (reply BUY to a wog alert) activates when Telegram is
-    # configured AND buying is armed/dry-run. Stays off on the public runner.
+    # configured AND at least one buyer is set up. Stays off on the public runner
+    # (no buyers there). Each buyer purchases with their own wog credentials.
     tg_controller = None
-    buy_active = bool(os.environ.get("WOG_BUY_ENABLED") or os.environ.get("WOG_BUY_DRYRUN"))
-    if telegram and buy_active:
+    buyers = load_buyers()
+    if telegram and buyers:
         import telegram_control
         import wog_buyer
+        authorized = {b["telegram_user_id"]: b for b in buyers}
         tg_controller = telegram_control.TelegramController(
-            telegram["token"], telegram["chat_ids"]
+            telegram["token"], telegram["chat_ids"], authorized=authorized
         )
+        _policy = wog_buyer.buyer_policy_from_env()
 
-        def _buy_handler(target):
-            return wog_buyer.buy_target(target, wog_buyer.buyer_config_from_env())
+        def _buy_handler(target, buyer):
+            cfg = dict(_policy)
+            cfg["username"] = buyer.get("username", "")
+            cfg["password"] = buyer.get("password", "")
+            # Per-person ledger so one person's orders never block another's.
+            cfg["ledger"] = f"bought_{buyer['telegram_user_id']}.json"
+            return wog_buyer.buy_target(target, cfg)
 
-        print("Reply-BUY active: reply BUY to a wog.ch alert to purchase it.")
+        who = ", ".join(b.get("name") or b["telegram_user_id"] for b in buyers)
+        armed = "ARMED" if _policy["enabled"] else "dry-run"
+        print(f"Reply-BUY active ({armed}) for: {who}")
 
     # POLL_SECONDS > 0 turns on loop mode: keep polling every POLL_SECONDS for
     # up to MAX_RUNTIME_MINUTES, then exit cleanly so the workflow's cron can

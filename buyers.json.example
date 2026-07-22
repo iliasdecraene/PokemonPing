@@ -1,0 +1,14 @@
+[
+  {
+    "telegram_user_id": "111111111",
+    "name": "Ilias",
+    "username": "my_wog_login",
+    "password": "my_wog_password"
+  },
+  {
+    "telegram_user_id": "222222222",
+    "name": "A friend",
+    "username": "their_wog_login",
+    "password": "their_wog_password"
+  }
+]
