@@ -210,39 +210,87 @@ class WogClient:
             "raw": data,
         }
 
-    # -- checkout (mapped on the VPS, safely) ------------------------------- #
-    def dump_checkout(self, out_dir: str) -> list[str]:
-        """SAFE recon: fetch the cart + checkout pages and dump every <form>.
+    # -- checkout recon (safe: reads pages, never confirms) ----------------- #
+    _CART_URL_CANDIDATES = [
+        "shoppingCart", "shoppingcart", "basket", "cart", "warenkorb",
+        "checkout", "kasse", "order", "bestellung", "orderProcess",
+        "orderOverview", "confirmOrder",
+    ]
 
-        Walks toward the order page but NEVER submits the final confirm. Run this
-        once on the VPS (logged in, with a target item in the cart) so the final
-        place_order_invoice() step can be wired to the real payment/confirm form.
+    def _discover_cart_urls(self) -> list[str]:
+        """Find cart/checkout links on the site so recon doesn't rely on guesses."""
+        urls: list[str] = []
+        try:
+            home = self.session.get(f"{WOG_BASE}/myAccount", timeout=30).text
+            for m in re.finditer(r'href="([^"]*index\.cfm/[^"]*)"', home):
+                u = m.group(1)
+                if re.search(r"(cart|basket|warenkorb|checkout|kasse|order|bestell)",
+                             u, re.I):
+                    full = u if u.startswith("http") else WOG_HOST + u
+                    if full not in urls:
+                        urls.append(full)
+        except requests.RequestException:
+            pass
+        for name in self._CART_URL_CANDIDATES:
+            u = f"{WOG_BASE}/{name}"
+            if u not in urls:
+                urls.append(u)
+        return urls
+
+    def inspect_checkout(self, out_dir: str | None = None) -> list[str]:
+        """SAFE recon: walk cart/checkout pages and report their forms, fields,
+        and payment options as plain text. NEVER submits the final confirm.
+
+        Run on the VPS (logged in, one item in the cart). Paste the output back so
+        place_order_invoice() can be wired to the real invoice-confirm form.
         """
-        out = Path(out_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        written = []
-        for name, url in [
-            ("basket", f"{WOG_BASE}/basket"),
-            ("cart", f"{WOG_BASE}/cart"),
-            ("checkout", f"{WOG_BASE}/checkout"),
-            ("order", f"{WOG_BASE}/order"),
-            ("myAccount", f"{WOG_BASE}/myAccount"),
-        ]:
+        report: list[str] = []
+        out = Path(out_dir) if out_dir else None
+        if out:
+            out.mkdir(parents=True, exist_ok=True)
+        for url in self._discover_cart_urls():
             try:
                 r = self.session.get(url, timeout=30)
-                p = out / f"checkout_{name}.html"
-                p.write_text(r.text, "utf-8")
-                forms = re.findall(r"<form[^>]*>", r.text, re.I)
-                written.append(f"{name}: HTTP {r.status_code}, {len(forms)} form(s) -> {p}")
             except requests.RequestException as e:
-                written.append(f"{name}: ERROR {e}")
-        return written
+                report.append(f"{url} -> ERROR {e}")
+                continue
+            name = url.rstrip("/").split("/")[-1]
+            forms = re.findall(r"<form\b[^>]*>", r.text, re.I)
+            pay = sorted(set(re.findall(
+                r"(rechnung|invoice|vorkasse|twint|postfinance|paypal|kreditkarte|"
+                r"zahlungsart|payment[\w-]*)", r.text, re.I)))
+            report.append(f"\n=== {name}  (HTTP {r.status_code}, {len(forms)} form(s)) "
+                          f"{url}")
+            if pay:
+                report.append("   payment hints: " + ", ".join(sorted({p.lower() for p in pay})))
+            for f in forms:
+                action = (re.search(r'action="([^"]*)"', f) or [None, "?"])[1]
+                method = (re.search(r'method="([^"]*)"', f) or [None, "?"])[1]
+                report.append(f"   <form action={action} method={method}>")
+            # input / select field names within the page (checkout fields live in
+            # these; names are what a POST needs).
+            fields = sorted(set(re.findall(r'<(?:input|select|button)[^>]*\bname="([^"]+)"',
+                                           r.text, re.I)))
+            if fields:
+                report.append("   fields: " + ", ".join(fields[:40]))
+            # radio/checkbox values around payment (the invoice option value).
+            for m in re.finditer(r'<input[^>]*name="([^"]*)"[^>]*value="([^"]*)"[^>]*>', r.text, re.I):
+                blob = m.group(0).lower()
+                if any(k in blob for k in ("rechnung", "invoice", "payment", "zahl")):
+                    report.append(f"   payment-input: name={m.group(1)} value={m.group(2)}")
+            if out and r.status_code == 200:
+                (out / f"checkout_{name}.html").write_text(r.text, "utf-8")
+        return report
+
+    # Back-compat alias.
+    def dump_checkout(self, out_dir: str) -> list[str]:
+        return self.inspect_checkout(out_dir)
 
     def place_order_invoice(self, confirm: bool = False) -> dict:
         raise CheckoutNotConfigured(
-            "Checkout confirm not yet mapped. Run dump_checkout() on the VPS "
-            "(logged in, item in cart) and share checkout_*.html so the invoice "
-            "confirm step can be wired. Until then, use MODE=cart."
+            "Checkout confirm not yet mapped. Run `wog_buyer.py recon-checkout` "
+            "on the VPS (logged in) and share the printed report so the invoice "
+            "confirm step can be wired."
         )
 
 
@@ -438,8 +486,27 @@ def _login_test() -> None:
     print("login:", "OK" if c.login() else "FAILED")
 
 
+def _find_orderable_product(client: "WogClient"):
+    """Pick any in-stock wog product so recon has a non-empty cart to inspect."""
+    in_stock = {"in stock normally", "in external stock"}
+    try:
+        r = client.session.post(
+            f"{WOG_BASE}/ajax.productList",
+            data={"platformID": "tc", "page": 1, "maxRows": 48, "orderBy": "bestseller"},
+            timeout=40)
+        for p in r.json().get("products", []):
+            if (p.get("deliveryText") or "").lower() in in_stock:
+                return str(p.get("productID")), p.get("title"), p.get("linkTo")
+    except (requests.RequestException, ValueError):
+        pass
+    return None, None, None
+
+
 def _recon_checkout() -> None:
-    """Login + add first arg product to cart + dump checkout pages (no confirm)."""
+    """Login, put ONE in-stock item in the cart, and print the checkout report.
+
+    Never confirms an order. Optional arg: a specific productID to use.
+    """
     cfg = buyer_config_from_env()
     if not cfg["username"] or not cfg["password"]:
         sys.exit("Set WOG_USERNAME and WOG_PASSWORD first.")
@@ -447,13 +514,21 @@ def _recon_checkout() -> None:
     if not c.login():
         sys.exit("login failed")
     print("logged in.")
+
     if len(sys.argv) > 2:
-        pid = sys.argv[2]
-        print("add_to_cart:", c.add_to_cart(pid))
-    out = os.environ.get("RECON_OUT", "./checkout_dump")
-    for line in c.dump_checkout(out):
-        print("  ", line)
-    print(f"Checkout pages dumped to {out} — share the checkout_*.html to wire full-auto.")
+        pid, title, link = sys.argv[2], "(given)", None
+    else:
+        pid, title, link = _find_orderable_product(c)
+    if not pid:
+        sys.exit("Couldn't find an in-stock product to add — pass a productID: "
+                 "wog_buyer.py recon-checkout <productID>")
+    print(f"using product {pid}  {title}")
+    print("add_to_cart:", c.add_to_cart(pid, product_url=(WOG_HOST + link) if link else None))
+
+    print("\n----- CHECKOUT REPORT (paste all of this back) -----")
+    for line in c.inspect_checkout(os.environ.get("RECON_OUT")):
+        print(line)
+    print("----- END REPORT -----")
 
 
 if __name__ == "__main__":
