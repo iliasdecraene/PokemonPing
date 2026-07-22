@@ -211,75 +211,85 @@ class WogClient:
         }
 
     # -- checkout recon (safe: reads pages, never confirms) ----------------- #
-    _CART_URL_CANDIDATES = [
-        "shoppingCart", "shoppingcart", "basket", "cart", "warenkorb",
-        "checkout", "kasse", "order", "bestellung", "orderProcess",
-        "orderOverview", "confirmOrder",
-    ]
+    # Anchors worth following forward through the checkout wizard...
+    _NEXT = re.compile(
+        r"(checkout|zur[- ]?kasse|/kasse|weiter|proceed|continue|order\.process|"
+        r"orderaddress|orderpayment|order-?overview|paymentmethod|payment-?method|"
+        r"zahlungsart|zahlung)", re.I)
+    # ...but NEVER follow anything that mutates the cart or commits the order.
+    _DANGER = re.compile(
+        r"(remove|delete|clear|cancel|logout|abmelden|confirm|bestellen|"
+        r"placeorder|execute|submit-?order|pay\.|\.remove|\.buy)", re.I)
 
-    def _discover_cart_urls(self) -> list[str]:
-        """Find cart/checkout links on the site so recon doesn't rely on guesses."""
-        urls: list[str] = []
-        try:
-            home = self.session.get(f"{WOG_BASE}/myAccount", timeout=30).text
-            for m in re.finditer(r'href="([^"]*index\.cfm/[^"]*)"', home):
-                u = m.group(1)
-                if re.search(r"(cart|basket|warenkorb|checkout|kasse|order|bestell)",
-                             u, re.I):
-                    full = u if u.startswith("http") else WOG_HOST + u
-                    if full not in urls:
-                        urls.append(full)
-        except requests.RequestException:
-            pass
-        for name in self._CART_URL_CANDIDATES:
-            u = f"{WOG_BASE}/{name}"
-            if u not in urls:
-                urls.append(u)
-        return urls
-
-    def inspect_checkout(self, out_dir: str | None = None) -> list[str]:
-        """SAFE recon: walk cart/checkout pages and report their forms, fields,
-        and payment options as plain text. NEVER submits the final confirm.
-
-        Run on the VPS (logged in, one item in the cart). Paste the output back so
-        place_order_invoice() can be wired to the real invoice-confirm form.
+    def inspect_checkout(self, out_dir: str | None = None, max_pages: int = 8) -> list[str]:
+        """SAFE recon: walk FORWARD from the cart through the checkout wizard,
+        reporting each page's forms, inputs (esp. payment radios), selects, any
+        'Rechnung' context, and the next-step links it follows. Follows only
+        navigation links (never remove/cancel/confirm), so it maps the flow up to
+        — but never through — the final place-order button.
         """
         report: list[str] = []
         out = Path(out_dir) if out_dir else None
         if out:
             out.mkdir(parents=True, exist_ok=True)
-        for url in self._discover_cart_urls():
+        seen: set[str] = set()
+        queue = [f"{WOG_BASE}/cart"]
+        page_no = 0
+        while queue and len(seen) < max_pages:
+            url = queue.pop(0)
+            if url in seen:
+                continue
+            seen.add(url)
             try:
                 r = self.session.get(url, timeout=30)
             except requests.RequestException as e:
-                report.append(f"{url} -> ERROR {e}")
+                report.append(f"\n=== {url} -> ERROR {e}")
                 continue
-            name = url.rstrip("/").split("/")[-1]
-            forms = re.findall(r"<form\b[^>]*>", r.text, re.I)
-            pay = sorted(set(re.findall(
-                r"(rechnung|invoice|vorkasse|twint|postfinance|paypal|kreditkarte|"
-                r"zahlungsart|payment[\w-]*)", r.text, re.I)))
-            report.append(f"\n=== {name}  (HTTP {r.status_code}, {len(forms)} form(s)) "
-                          f"{url}")
-            if pay:
-                report.append("   payment hints: " + ", ".join(sorted({p.lower() for p in pay})))
-            for f in forms:
-                action = (re.search(r'action="([^"]*)"', f) or [None, "?"])[1]
-                method = (re.search(r'method="([^"]*)"', f) or [None, "?"])[1]
-                report.append(f"   <form action={action} method={method}>")
-            # input / select field names within the page (checkout fields live in
-            # these; names are what a POST needs).
-            fields = sorted(set(re.findall(r'<(?:input|select|button)[^>]*\bname="([^"]+)"',
-                                           r.text, re.I)))
-            if fields:
-                report.append("   fields: " + ", ".join(fields[:40]))
-            # radio/checkbox values around payment (the invoice option value).
-            for m in re.finditer(r'<input[^>]*name="([^"]*)"[^>]*value="([^"]*)"[^>]*>', r.text, re.I):
-                blob = m.group(0).lower()
-                if any(k in blob for k in ("rechnung", "invoice", "payment", "zahl")):
-                    report.append(f"   payment-input: name={m.group(1)} value={m.group(2)}")
+            page_no += 1
+            report.append(f"\n=== page {page_no}: {url}  (HTTP {r.status_code})")
+
+            for fm in re.finditer(r"<form\b[^>]*>", r.text, re.I):
+                action = (re.search(r'action="([^"]*)"', fm.group(0)) or [None, "?"])[1]
+                method = (re.search(r'method="([^"]*)"', fm.group(0)) or [None, "?"])[1]
+                report.append(f"   form: {method} -> {action}")
+
+            for m in re.finditer(r"<input\b[^>]*>", r.text, re.I):
+                tag = m.group(0)
+                name = (re.search(r'\bname="([^"]*)"', tag) or [None, None])[1]
+                if not name:
+                    continue
+                typ = (re.search(r'\btype="([^"]*)"', tag) or [None, ""])[1]
+                val = (re.search(r'\bvalue="([^"]*)"', tag) or [None, ""])[1]
+                if (typ.lower() in ("radio", "checkbox", "hidden")
+                        or re.search(r"(payment|zahl|rechnung|invoice)", tag, re.I)):
+                    report.append(f"   input {typ or '?'} name={name} value={val[:48]}")
+
+            for sel in re.finditer(r'<select\b[^>]*\bname="([^"]*)"[^>]*>(.*?)</select>',
+                                   r.text, re.I | re.S):
+                opts = re.findall(r'<option[^>]*value="([^"]*)"[^>]*>([^<]*)</option>',
+                                  sel.group(2), re.I)
+                report.append(f"   select name={sel.group(1)}: "
+                              + "; ".join(f"{v}={t.strip()[:24]}" for v, t in opts[:12]))
+
+            shown = 0
+            for m in re.finditer(r"(kauf auf rechnung|rechnung|invoice)", r.text, re.I):
+                ctx = re.sub(r"\s+", " ", r.text[max(0, m.start() - 70):m.start() + 70])
+                report.append(f"   PAY-CTX: …{ctx}…")
+                shown += 1
+                if shown >= 3:
+                    break
+
+            for a in re.finditer(r'<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r.text, re.I | re.S):
+                href, text = a.group(1), re.sub(r"<[^>]+>", "", a.group(2)).strip()
+                blob = f"{href} {text}"
+                if "index.cfm" in href and self._NEXT.search(blob) and not self._DANGER.search(blob):
+                    full = href if href.startswith("http") else WOG_HOST + href
+                    report.append(f"   NEXT-LINK: '{text[:32]}' -> {full}")
+                    if full not in seen:
+                        queue.append(full)
+
             if out and r.status_code == 200:
-                (out / f"checkout_{name}.html").write_text(r.text, "utf-8")
+                (out / f"page_{page_no}.html").write_text(r.text, "utf-8")
         return report
 
     # Back-compat alias.
