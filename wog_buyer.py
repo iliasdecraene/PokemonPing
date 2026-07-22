@@ -570,6 +570,19 @@ def _find_orderable_product(client: "WogClient"):
     return None, None, None
 
 
+def _try_buy() -> None:
+    """Exercise the real buy path for one productID, as if a BUY reply came in.
+    Honours WOG_BUY_ENABLED (armed => clears cart, adds item, prints the confirm
+    link; unset => dry-run 'would buy'). Usage: try-buy <productID> [name]"""
+    if len(sys.argv) < 3:
+        sys.exit("usage: wog_buyer.py try-buy <productID> [name]")
+    pid = sys.argv[2]
+    name = sys.argv[3] if len(sys.argv) > 3 else f"test item {pid}"
+    target = {"key": f"wog:{pid}", "name": name, "series": "-EN-",
+              "link": "", "price": ""}
+    print(buy_target(target, buyer_config_from_env()))
+
+
 def _recon_page() -> None:
     """GET one wog page (default cart.address) and dump its forms+fields, payment
     inputs, Rechnung context, and next-step controls. Read-only — never POSTs.
@@ -742,6 +755,9 @@ if __name__ == "__main__":
         _recon_trigger()
     elif cmd == "recon-page":
         _recon_page()
+    elif cmd == "try-buy":
+        _try_buy()
     else:
         sys.exit(f"unknown command {cmd!r}; use: self-test | login-test | "
-                 f"recon-checkout [productID] | recon-trigger | recon-page [path]")
+                 f"recon-checkout [productID] | recon-trigger | recon-page [path] | "
+                 f"try-buy <productID> [name]")
