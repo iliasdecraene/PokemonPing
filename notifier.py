@@ -64,8 +64,29 @@ ALERT_COOLDOWN_SECONDS = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "1800") or
 # timestamps used for the cooldown above.
 RECENT_ALERTS_KEY = "_meta:recent_alerts"
 
-# Treated as "in stock" for the wog.ch adapter (green availability states).
-WOG_IN_STOCK = {"in stock normally", "in external stock"}
+# wog.ch orderability. Every product carries a numeric `delivery` code that maps
+# 1:1 to its availability — far more reliable than string-matching deliveryText
+# (which is localized and has ~7 variants). The codes:
+#     0   "not yet released"      -> CAN be pre-ordered            (orderable)
+#     1   "in stock normally"                                      (orderable)
+#     1.5 "in external stock"     supplier stock                   (orderable)
+#     2   "longer delivery times" orderable from supplier          (orderable)
+#     3   "currently out of stock" sold out, expected back later   (NOT orderable)
+#     4   "no longer available"   not yet orderable / sold out     (NOT orderable)
+# So "orderable" == delivery <= 2. Crucially this includes code 0: a pre-order
+# opening (a 30th-Celebration drop) flips 4 -> 0, which the old "in stock
+# normally / in external stock" test missed entirely -> missed restock alerts.
+WOG_ORDERABLE_MAX_DELIVERY = 2.0
+
+
+def _wog_orderable(product: dict) -> bool:
+    try:
+        return float(product.get("delivery")) <= WOG_ORDERABLE_MAX_DELIVERY
+    except (TypeError, ValueError):
+        # Unknown/empty code: fall back to the deliveryText green states so we
+        # never regress below the old behaviour.
+        return (product.get("deliveryText") or "").strip().lower() in (
+            "in stock normally", "in external stock")
 
 
 # --------------------------------------------------------------------------- #
@@ -423,11 +444,19 @@ def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
                 continue
             delivery = p.get("deliveryText") or ""
             unit_price = p.get("unitPrice")
+            # A pre-order (code 0) is orderable but reads as "not yet released";
+            # relabel it so the alert isn't self-contradictory ("Back in stock …
+            # not yet released"). Other states keep wog's own wording.
+            try:
+                is_preorder = float(p.get("delivery")) == 0.0
+            except (TypeError, ValueError):
+                is_preorder = False
+            availability = "Pre-order open" if is_preorder else delivery
             seen[pid] = make_item(
                 site, pid, p.get("title"),
-                in_stock=delivery in WOG_IN_STOCK,
+                in_stock=_wog_orderable(p),
                 price=(f"CHF {unit_price}" if unit_price else ""),
-                availability=delivery,
+                availability=availability,
                 link=p.get("linkTo"),
                 series=match_value,   # seriesName — keeps the "-EN-" marker
             )
