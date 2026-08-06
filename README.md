@@ -23,6 +23,9 @@ services. State lives in the Actions cache, so it only ever alerts on *changes*.
 | [laschocards.ch](https://laschocards.ch/en/collections/pre-order) | **New** English pre-orders only (language is a variant) | Shopify feed, per-variant tracking, `new`-only alerts |
 | [detsuki.ch](https://detsuki.ch/collections/pokemon) | English variants of Pokémon products (language is a variant) | Shopify feed, per-variant tracking |
 | [theuncommonshop.ch](https://theuncommonshop.ch) | Sealed English Pokémon TCG (displays, ETBs, boxes, tins…) | WooCommerce Store API, category + `Sprache` attribute filters, polled every ~2 min |
+| [maro-shop.ch](https://www.maro-shop.ch/collections/pokemon) | English + Japanese Pokémon (language is an `EN`/`JAP` code in the title) | Shopify feed, title language-code filter |
+| [cardmaniac.ch](https://cardmaniac.ch/collections/pokemon-tcg-karten-kaufen) | English + Japanese sealed Pokémon (language is a `Sprache` variant) | Shopify feed, per-variant tracking (`Englisch`/`Japanisch`) |
+| [collectorama.ch](https://www.collectorama.ch/sealed-produkte) | English + Japanese sealed Pokémon (language is the product `ribbon`) | Wix Stores storefront GraphQL, non-Pokémon brands excluded |
 
 ---
 
@@ -54,7 +57,13 @@ Each shop is handled by an **adapter** chosen by the site's `type`:
 - **`shopify`** — fetches a Shopify collection's public `products.json` feed
   (e.g. `…/collections/pokemon/products.json`). Clean JSON with per-variant
   `available` + `price`; stock = any variant available. Filtered by a title
-  substring.
+  substring, a title language **code** (`lang_codes`, e.g. `EN`/`JAP` as a whole
+  word), and/or a **variant** filter (`variant_filter`, which accepts a list to
+  track several languages).
+- **`wix`** — reads a Wix Stores shop's storefront GraphQL catalog. Fetches a
+  public per-visitor access token from `/_api/v1/access-tokens`, then queries
+  `productsWithMetaData`. Language is taken from each product's `ribbon`
+  (`ribbon_langs`), and non-Pokémon brands are dropped via `exclude_name_terms`.
 
 Adding a shop that uses an **existing** adapter is pure config — no code.
 
@@ -182,9 +191,30 @@ and variables → Actions → *Variables*) to a JSON array — see
   collection you want and set `name_filter` to a title substring.
 - `variant_filter` *(optional)* — when language/edition is a Shopify **variant**
   rather than part of the title (e.g. a `Language: English/German/French`
-  option), set this to the variant name (e.g. `"English"`). Each matching
-  variant is then tracked on its own — its own stock, its own price, and a deep
-  `?variant=…` link straight to that language.
+  option), set this to the variant name (e.g. `"English"`), or a **list** to
+  keep several (e.g. `["Englisch", "Japanisch"]`). Each matching variant is then
+  tracked on its own — its own stock, its own price, and a deep `?variant=…`
+  link straight to that language.
+- `lang_codes` *(optional)* — when language is an uppercase **code in the title**
+  (e.g. maro-shop's `… - EN` / `… JAP`), list the codes to keep as whole words,
+  e.g. `["EN", "JAP"]`. Products without one are dropped (keeps DE/FR/… out).
+
+**Wix Stores shop:**
+```json
+{
+  "id": "collectorama",
+  "type": "wix",
+  "label": "Collectorama",
+  "base_url": "https://www.collectorama.ch",
+  "ribbon_langs": ["Englisch", "Japanisch"],
+  "exclude_name_terms": ["yu-gi-oh", "lorcana", "one piece"]
+}
+```
+- `base_url` is the shop root. The adapter grabs a public visitor token from
+  `<base_url>/_api/v1/access-tokens` and queries the Wix Stores GraphQL catalog.
+- `ribbon_langs` keeps only products whose `ribbon` contains one of these (Wix
+  shops often put the language/category in the ribbon). `exclude_name_terms`
+  drops non-Pokémon brands on a multi-game shop (matched anywhere in the name).
 - `alert_on` *(optional, any site type)* — which changes notify you. Defaults to
   `["new", "restock"]`. Use `["new"]` for a **pre-order shop** that re-lists the
   same item at ever-rising prices (you only want the first, retail-priced drop);

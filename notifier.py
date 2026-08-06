@@ -19,6 +19,8 @@ Adapters currently supported (the "type" field):
   * "wog"         - wog.ch's ajax.search endpoint (JSON).
   * "shopify"     - any Shopify shop's <collection>/products.json feed.
                     e.g. wellplayed.ch
+  * "wix"         - any Wix Stores shop's storefront GraphQL API (JSON).
+                    e.g. collectorama.ch
 
 State (what we saw last run) is kept in a small JSON file so we only alert on
 *changes*. On GitHub Actions that file is persisted via the Actions cache.
@@ -29,6 +31,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -77,6 +80,34 @@ RECENT_ALERTS_KEY = "_meta:recent_alerts"
 # opening (a 30th-Celebration drop) flips 4 -> 0, which the old "in stock
 # normally / in external stock" test missed entirely -> missed restock alerts.
 WOG_ORDERABLE_MAX_DELIVERY = 2.0
+
+
+def _as_lower_list(value) -> list[str]:
+    """Normalize a str | list | None config value to a list of lowercase strings.
+
+    Lets a filter accept either "English" or ["Englisch", "Japanisch"].
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value.lower()]
+    return [str(v).lower() for v in value]
+
+
+def _title_has_lang(title: str, codes: list[str]) -> bool:
+    """True if the title contains one of `codes` as a standalone UPPERCASE token.
+
+    Some shops tag language with an uppercase code in the title, e.g. maro-shop:
+    "... Series 3 - EN", "... Booster Pack JAP", "... EX Tin Box EN (1 Stk...)",
+    "... Booster Pack EN SV10". The code isn't always the trailing word (a
+    parenthetical or set code can follow), so we look for it anywhere — but only
+    as a whole word (\\bEN\\b won't fire inside "Green") and case-sensitively, so
+    a lowercase "en" inside a German word like "Rivalen" never matches. A product
+    with no EN/JAP token is dropped (keeps DE/FR/CHN/KOR out)."""
+    if not codes:
+        return True
+    pattern = r"\b(?:" + "|".join(re.escape(c) for c in codes) + r")\b"
+    return bool(re.search(pattern, title))
 
 
 def _wog_orderable(product: dict) -> bool:
@@ -170,6 +201,39 @@ DEFAULT_SITES = [
         # ~600 products across ~18 pages per poll — too many requests to repeat
         # every 30 s, and their WAF is trigger-happy. Poll every 2 min instead.
         "min_poll_seconds": 120,
+    },
+    {
+        "id": "maroshop",
+        "type": "shopify",
+        "label": "Maro-Shop",
+        "collection_url": "https://www.maro-shop.ch/collections/pokemon",
+        # Language is an uppercase code in the title ("... - EN", "... JAP").
+        # Keep English + Japanese only (DE/FR/CHN/KOR and untagged are dropped).
+        "lang_codes": ["EN", "JAP"],
+    },
+    {
+        "id": "cardmaniac",
+        "type": "shopify",
+        "label": "Cardmaniac",
+        "collection_url": "https://cardmaniac.ch/collections/pokemon-tcg-karten-kaufen",
+        # Language is a "Sprache" variant (Englisch/Japanisch/Deutsch/Französisch).
+        # Track the English and Japanese variants (each has its own stock + link).
+        "variant_filter": ["Englisch", "Japanisch"],
+    },
+    {
+        "id": "collectorama",
+        "type": "wix",
+        "label": "Collectorama",
+        "base_url": "https://www.collectorama.ch",
+        # Multi-game Wix shop. Language lives in the `ribbon` field; keep
+        # English + Japanese. Drop non-Pokémon brands (this shop's catalog is
+        # ~all Pokémon, but it does list the odd Yu-Gi-Oh etc.).
+        "ribbon_langs": ["Englisch", "Japanisch"],
+        "exclude_name_terms": [
+            "yu-gi-oh", "yugioh", "lorcana", "one piece", "magic", "mtg",
+            "disney", "digimon", "star wars", "flesh and blood", "gundam",
+            "weiss", "weiß", "dragon ball", "union arena",
+        ],
     },
 ]
 
@@ -478,9 +542,14 @@ def fetch_shopify(site: dict, session: requests.Session) -> list[dict]:
     name_filter = (site.get("name_filter") or "").lower()
     # When set, language/variant is a Shopify *variant* (not in the title). We
     # then track each matching variant separately (key = variant id) and check
-    # that variant's own stock. e.g. variant_filter "English" on a shop whose
-    # products have a Language option.
-    variant_filter = (site.get("variant_filter") or "").lower()
+    # that variant's own stock. Accepts a single string OR a list — a list keeps
+    # a variant matching ANY entry, e.g. ["Englisch", "Japanisch"] to track both
+    # languages on a shop whose products have a "Sprache" option (cardmaniac).
+    variant_filter = _as_lower_list(site.get("variant_filter"))
+    # Language marked as an uppercase code somewhere in the title (e.g.
+    # maro-shop's "... Series 3 - EN" / "... EX Tin Box EN (1 Stk...)"). Keep
+    # only products carrying one of these codes as a whole word. e.g. ["EN","JAP"].
+    lang_codes = [s.upper() for s in (site.get("lang_codes") or [])]
     per_page = int(site.get("per_page", 250))           # 250 = Shopify's max
 
     # Product links: keep any locale prefix (e.g. ".../en/") that precedes
@@ -500,14 +569,16 @@ def fetch_shopify(site: dict, session: requests.Session) -> list[dict]:
             title = p.get("title") or ""
             if name_filter and name_filter not in title.lower():
                 continue
+            if lang_codes and not _title_has_lang(title, lang_codes):
+                continue
             handle = p.get("handle")
             variants = p.get("variants") or []
 
             if variant_filter:
                 # One item per matching variant (e.g. the English one).
                 for v in variants:
-                    vtitle = (v.get("title") or "")
-                    if variant_filter not in vtitle.lower():
+                    vtitle = v.get("title") or ""
+                    if not any(f in vtitle.lower() for f in variant_filter):
                         continue
                     avail = bool(v.get("available"))
                     price = v.get("price")
@@ -538,10 +609,88 @@ def fetch_shopify(site: dict, session: requests.Session) -> list[dict]:
     return items
 
 
+# --------------------------------------------------------------------------- #
+# Adapter: Wix Stores storefront GraphQL
+# --------------------------------------------------------------------------- #
+# Wix shops are JS-rendered with no products.json feed. But the storefront reads
+# its catalog from a GraphQL endpoint, which we call the same way the site does:
+#   1. GET /_api/v1/access-tokens  -> a per-visitor "instance" token for the
+#      Wix Stores app (appDefId 1380b703-…). No login needed; it's public.
+#   2. POST /_api/wix-ecommerce-storefront-web/api with that token as the
+#      Authorization header and a productsWithMetaData GraphQL query.
+#
+# Language note: collectorama encodes language in the `ribbon` field
+# ("Englisch" / "Japanisch" / "Deutsch" / "Englisch - Preorder"), which is
+# exactly the site's own "Kategorie" filter — far more reliable than the title
+# suffix. It's also a multi-game shop, so `exclude_name_terms` drops non-Pokémon
+# brands (Yu-Gi-Oh!, Lorcana, …). `ribbon_langs` keeps English + Japanese only.
+
+WIX_STORES_APP_ID = "1380b703-ce81-ff05-f115-39571d94dfcd"
+# "All Products" is Wix's built-in collection whose id is fixed across all sites.
+WIX_ALL_PRODUCTS = "00000000-000000-000000-000000000001"
+_WIX_QUERY = (
+    "query($cid:String!,$limit:Int!,$offset:Int!){catalog{category(categoryId:$cid)"
+    "{productsWithMetaData(limit:$limit,offset:$offset){totalCount list"
+    "{id name isInStock ribbon urlPart formattedPrice}}}}}"
+)
+
+
+def fetch_wix(site: dict, session: requests.Session) -> list[dict]:
+    base = site["base_url"].rstrip("/")
+    ribbon_langs = _as_lower_list(site.get("ribbon_langs"))
+    excl_terms = [t.lower() for t in (site.get("exclude_name_terms") or [])]
+    cid = site.get("collection_id", WIX_ALL_PRODUCTS)
+    app_id = site.get("wix_stores_app_id", WIX_STORES_APP_ID)
+    per_page = int(site.get("per_page", 100))
+
+    tokens = session.get(f"{base}/_api/v1/access-tokens", timeout=30).json()
+    token = tokens["apps"][app_id]["instance"]
+    api = f"{base}/_api/wix-ecommerce-storefront-web/api"
+
+    items: list[dict] = []
+    offset = 0
+    while True:
+        resp = session.post(
+            api,
+            json={"query": _WIX_QUERY,
+                  "variables": {"cid": cid, "limit": per_page, "offset": offset}},
+            headers={"Authorization": token, "Content-Type": "application/json"},
+            timeout=40,
+        )
+        resp.raise_for_status()
+        meta = (resp.json().get("data") or {}).get("catalog", {}) \
+            .get("category", {}).get("productsWithMetaData") or {}
+        products = meta.get("list") or []
+        for p in products:
+            name = p.get("name") or ""
+            low = name.lower()
+            if excl_terms and any(t in low for t in excl_terms):
+                continue
+            ribbon = p.get("ribbon") or ""
+            if ribbon_langs and not any(l in ribbon.lower() for l in ribbon_langs):
+                continue
+            avail = bool(p.get("isInStock"))
+            items.append(make_item(
+                site, p.get("id"), name,
+                in_stock=avail,
+                price=p.get("formattedPrice") or "",
+                availability=ribbon or ("In stock" if avail else "Sold out"),
+                link=f"{base}/product-page/{p.get('urlPart')}",
+                series=ribbon,      # carries the language marker
+            ))
+        offset += per_page
+        if not products or offset >= int(meta.get("totalCount") or 0):
+            break
+        if offset > 5000:  # safety stop
+            break
+    return items
+
+
 ADAPTERS = {
     "woocommerce": fetch_woocommerce,
     "wog": fetch_wog,
     "shopify": fetch_shopify,
+    "wix": fetch_wix,
 }
 
 
