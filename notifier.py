@@ -744,8 +744,13 @@ def build_alerts(prev: dict[str, dict], curr: dict[str, dict]) -> list[tuple[str
                 continue  # silent seed for a brand-new site
             if "new" not in alert_on:
                 continue
-            tag = "🆕 New" + (" (in stock)" if now["in_stock"] else " (not yet in stock)")
-            alerts.append((f"new:{key}", render_message(tag, now)))
+            if not now["in_stock"]:
+                # A brand-new listing the shop put up before release (preparing
+                # for a drop) is not buyable yet. Seed it silently — it's still
+                # stored in state, so when it flips to in stock the restock
+                # branch below fires "Back in stock" at the moment it matters.
+                continue
+            alerts.append((f"new:{key}", render_message("🆕 New (in stock)", now)))
         elif not before.get("in_stock") and now["in_stock"]:
             if "restock" not in alert_on:
                 continue
