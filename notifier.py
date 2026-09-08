@@ -374,7 +374,8 @@ def load_telegram() -> dict | None:
 #   {key, label, name, in_stock, price, availability, link}
 
 
-def make_item(site, pid, name, in_stock, price, availability, link, series="") -> dict:
+def make_item(site, pid, name, in_stock, price, availability, link, series="",
+              preorder=False) -> dict:
     return {
         "key": f"{site['id']}:{pid}",
         "label": site["label"],
@@ -384,6 +385,11 @@ def make_item(site, pid, name, in_stock, price, availability, link, series="") -
         # language gate; harmless empty string elsewhere.
         "series": html.unescape((series or "").strip()),
         "in_stock": bool(in_stock),
+        # A pre-order / "not yet released" item is orderable (in_stock=True) but
+        # hasn't shipped yet. Tracking it lets build_alerts fire a second time
+        # when it flips from pre-order to actually-in-stock — a transition the
+        # in_stock boolean alone can't see (both states are in_stock=True).
+        "preorder": bool(preorder),
         "price": price or "",
         "availability": availability or "",
         "link": link or "",
@@ -560,6 +566,7 @@ def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
                 availability=availability,
                 link=p.get("linkTo"),
                 series=match_value,   # seriesName — keeps the "-EN-" marker
+                preorder=is_preorder,  # code 0: orderable but not yet shipped
             )
         if len(products) < max_rows:
             break
@@ -787,11 +794,23 @@ def build_alerts(prev: dict[str, dict], curr: dict[str, dict]) -> list[tuple[str
                 # stored in state, so when it flips to in stock the restock
                 # branch below fires "Back in stock" at the moment it matters.
                 continue
-            alerts.append((f"new:{key}", render_message("🆕 New (in stock)", now)))
+            head = "🆕 New (pre-order open)" if now.get("preorder") else "🆕 New (in stock)"
+            alerts.append((f"new:{key}", render_message(head, now)))
         elif not before.get("in_stock") and now["in_stock"]:
             if "restock" not in alert_on:
                 continue
-            alerts.append((f"restock:{key}", render_message("📦 Back in stock", now)))
+            head = "📦 Pre-order open" if now.get("preorder") else "📦 Back in stock"
+            alerts.append((f"restock:{key}", render_message(head, now)))
+        elif (before.get("in_stock") and now["in_stock"]
+              and before.get("preorder") and not now.get("preorder")):
+            # Was an orderable pre-order ("not yet released"), now actually in
+            # stock. Both states are in_stock=True, so this transition is
+            # invisible to the restock branch above — alert on it separately so
+            # a pre-order landing in stock still pings. (Distinct event id, so
+            # it never collides with the earlier "new" alert in the cooldown.)
+            if "restock" not in alert_on:
+                continue
+            alerts.append((f"instock:{key}", render_message("📦 Now in stock", now)))
     return alerts
 
 
