@@ -162,9 +162,8 @@ DEFAULT_SITES = [
         "search_term": "zelda",
         # WOG's search is fuzzy and slips in a few unrelated titles (e.g. movies
         # with a "Zelda" in the credits). Require the word in the product title
-        # so only actual Zelda products alert. ("Zelda" is a proper noun WOG
-        # always capitalises; the filter is a case-sensitive substring.)
-        "name_filter": "Zelda",
+        # so only actual Zelda products alert. Matched case-insensitively.
+        "name_filter": "zelda",
         "order_by": "releasedate",
         "max_rows": 96,
         "max_pages": 5,
@@ -535,7 +534,9 @@ def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
         products = resp.json().get("products", [])
         for p in products:
             match_value = p.get(match_field) or p.get("title") or ""
-            if name_filter and name_filter not in match_value:
+            # Case-insensitive: catch "Zelda"/"ZELDA"/"zelda" alike. Safe for the
+            # "-EN-" marker too (its lowercased form only occurs as the marker).
+            if name_filter and name_filter.lower() not in match_value.lower():
                 continue
             if platform_name and p.get("platformName") != platform_name:
                 continue
