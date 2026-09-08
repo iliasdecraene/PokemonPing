@@ -151,6 +151,25 @@ DEFAULT_SITES = [
         "max_pages": 8,
     },
     {
+        "id": "wogzelda",
+        "type": "wog",
+        "label": "WOG.ch (Zelda)",
+        # Keyword search across WOG's whole catalogue for anything with "zelda"
+        # in the name (games, amiibo/figures, manga, merch). Not a Pokémon watch
+        # and not language-filtered: the -EN- rule is Pokémon-TCG-specific.
+        # ~254 hits => 96 rows/page covers it in 3 requests. Alerts only (the
+        # reply-BUY / auto-buy path is keyed to site id "wog", not "wogzelda").
+        "search_term": "zelda",
+        # WOG's search is fuzzy and slips in a few unrelated titles (e.g. movies
+        # with a "Zelda" in the credits). Require the word in the product title
+        # so only actual Zelda products alert. ("Zelda" is a proper noun WOG
+        # always capitalises; the filter is a case-sensitive substring.)
+        "name_filter": "Zelda",
+        "order_by": "releasedate",
+        "max_rows": 96,
+        "max_pages": 5,
+    },
+    {
         "id": "wellplayed",
         "type": "shopify",
         "label": "WellPlayed",
@@ -478,23 +497,40 @@ def _woo_price(prices: dict) -> str:
 # "US-Version"/"UK-Version"; German ones have none.)
 
 def fetch_wog(site: dict, session: requests.Session) -> list[dict]:
-    platform_id = site.get("platform_id", "tc")        # "tc" = Trading Cards
-    tag = str(site.get("tag", "392"))                  # 392 = Pokémon TCG genre
     order_by = site.get("order_by", "releasedate")
-    name_filter = site.get("name_filter", "-EN-")      # matched against seriesName
-    match_field = site.get("match_field", "seriesName")
-    platform_name = site.get("platform_name", "Trading Cards")  # defence-in-depth
     max_pages = int(site.get("max_pages", 8))
-    max_rows = int(site.get("max_rows", 48))           # >48 returns a degraded payload
+    max_rows = int(site.get("max_rows", 48))           # >48 degrades productList
     base = site.get("base_url", "https://www.wog.ch/en/index.cfm")
+
+    # Two modes. "search_term" set => ajax.search, a keyword search across the
+    # whole catalogue (games, figures, manga, merch...). It already restricts to
+    # products whose name matches, so there's no single platform to defend on and
+    # the -EN- language marker (Pokémon-TCG-specific) doesn't apply. Otherwise the
+    # original ajax.productList genre browse (platformID + tag).
+    search_term = site.get("search_term")
+    if search_term:
+        endpoint = "ajax.search"
+        name_filter = site.get("name_filter", "")          # search already filters
+        match_field = site.get("match_field", "title")
+        platform_name = site.get("platform_name", "")      # spans platforms
+    else:
+        endpoint = "ajax.productList"
+        platform_id = site.get("platform_id", "tc")        # "tc" = Trading Cards
+        tag = str(site.get("tag", "392"))                  # 392 = Pokémon TCG genre
+        name_filter = site.get("name_filter", "-EN-")      # matched vs seriesName
+        match_field = site.get("match_field", "seriesName")
+        platform_name = site.get("platform_name", "Trading Cards")  # defence
 
     seen: dict = {}
     for page in range(1, max_pages + 1):
-        data = {"platformID": platform_id, "page": page,
-                "maxRows": max_rows, "orderBy": order_by}
-        if tag:
-            data["tag"] = tag
-        resp = session.post(f"{base}/ajax.productList", data=data, timeout=40)
+        data = {"page": page, "maxRows": max_rows, "orderBy": order_by}
+        if search_term:
+            data["searchTerm"] = search_term
+        else:
+            data["platformID"] = platform_id
+            if tag:
+                data["tag"] = tag
+        resp = session.post(f"{base}/{endpoint}", data=data, timeout=40)
         resp.raise_for_status()
         products = resp.json().get("products", [])
         for p in products:

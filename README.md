@@ -18,7 +18,8 @@ services. State lives in the Actions cache, so it only ever alerts on *changes*.
 | Shop | What's matched | How |
 |------|----------------|-----|
 | [cardcollectors.ch](https://cardcollectors.ch) | Pokémon products with `(EN)` in the title | WooCommerce Store API (clean JSON) |
-| [wog.ch](https://www.wog.ch) | Pokémon **Trading Cards** with `-EN-` in the title | wog's `ajax.search` JSON endpoint |
+| [wog.ch](https://www.wog.ch) | Pokémon **Trading Cards** with `-EN-` in the title | wog's `ajax.productList` JSON endpoint |
+| [wog.ch](https://www.wog.ch) (Zelda) | Anything with **`Zelda`** in the name (games, amiibo, manga, merch — all platforms) | wog's `ajax.search` keyword endpoint |
 | [wellplayed.ch](https://www.wellplayed.ch/collections/pokemon) | Pokémon TCG products with `(EN)` in the title | Shopify `products.json` collection feed |
 | [laschocards.ch](https://laschocards.ch/en/collections/pre-order) | **New** English pre-orders only (language is a variant) | Shopify feed, per-variant tracking, `new`-only alerts |
 | [detsuki.ch](https://detsuki.ch/collections/pokemon) | English variants of Pokémon products (language is a variant) | Shopify feed, per-variant tracking |
@@ -175,6 +176,25 @@ and variables → Actions → *Variables*) to a JSON array — see
   read the tag id from the `Pokémon TCG`-style checkbox (`value="392"`).
 - `name_filter` is matched against `match_field` (default `seriesName`, which
   keeps the `-EN-` language marker — the display title does not).
+
+**wog.ch keyword search** (any product name, across the whole catalogue):
+```json
+{
+  "id": "wogzelda",
+  "type": "wog",
+  "label": "WOG.ch (Zelda)",
+  "search_term": "zelda",
+  "name_filter": "Zelda",
+  "order_by": "releasedate",
+  "max_rows": 96,
+  "max_pages": 5
+}
+```
+- Setting `search_term` switches this adapter from the genre browse
+  (`ajax.productList`) to wog's `ajax.search` keyword endpoint, spanning every
+  platform (games, figures, manga, merch). No `-EN-`/platform restriction applies.
+- wog's search is fuzzy, so keep a `name_filter` (matched against the product
+  `title`) to drop the odd unrelated hit — it's a case-sensitive substring.
 
 **Shopify shop:**
 ```json
