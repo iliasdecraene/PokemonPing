@@ -128,16 +128,21 @@ def _wog_orderable(product: dict) -> bool:
 # touching this file.
 
 DEFAULT_SITES = [
-    {
-        "id": "cardcollectors",
-        "type": "woocommerce",
-        "label": "CardCollectors",
-        # brand=3038 is the Pokémon brand on cardcollectors.ch.
-        "api_url": "https://cardcollectors.ch/wp-json/wc/store/v1/products"
-                   "?brand=3038&orderby=date&order=desc",
-        "brand_id": "3038",      # defence-in-depth client-side check ("" disables)
-        "name_filter": "(EN)",   # case-insensitive substring the title must contain
-    },
+    # CardCollectors — DISABLED (uncomment to re-enable). As of Oct 2026 the whole
+    # site sits behind a proof-of-work JS bot challenge: every URL (even
+    # robots.txt) returns 403 + a "Please wait a moment" page to non-browser
+    # clients, so the WooCommerce Store API can't be read over plain HTTP. Nothing
+    # fixable our side; re-enable if they drop the shield.
+    # {
+    #     "id": "cardcollectors",
+    #     "type": "woocommerce",
+    #     "label": "CardCollectors",
+    #     # brand=3038 is the Pokémon brand on cardcollectors.ch.
+    #     "api_url": "https://cardcollectors.ch/wp-json/wc/store/v1/products"
+    #                "?brand=3038&orderby=date&order=desc",
+    #     "brand_id": "3038",      # defence-in-depth client-side check ("" disables)
+    #     "name_filter": "(EN)",   # case-insensitive substring the title must contain
+    # },
     {
         "id": "wog",
         "type": "wog",
