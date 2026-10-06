@@ -150,24 +150,19 @@ DEFAULT_SITES = [
         "platform_name": "Trading Cards",
         "max_pages": 8,
     },
-    {
-        "id": "wogzelda",
-        "type": "wog",
-        "label": "WOG.ch (Zelda)",
-        # Keyword search across WOG's whole catalogue for anything with "zelda"
-        # in the name (games, amiibo/figures, manga, merch). Not a Pokémon watch
-        # and not language-filtered: the -EN- rule is Pokémon-TCG-specific.
-        # ~254 hits => 96 rows/page covers it in 3 requests. Alerts only (the
-        # reply-BUY / auto-buy path is keyed to site id "wog", not "wogzelda").
-        "search_term": "zelda",
-        # WOG's search is fuzzy and slips in a few unrelated titles (e.g. movies
-        # with a "Zelda" in the credits). Require the word in the product title
-        # so only actual Zelda products alert. Matched case-insensitively.
-        "name_filter": "zelda",
-        "order_by": "releasedate",
-        "max_rows": 96,
-        "max_pages": 5,
-    },
+    # Zelda watch — DISABLED (uncomment the block to re-enable). Keyword search
+    # across WOG's whole catalogue for anything with "zelda" in the name (games,
+    # amiibo/figures, manga, merch). Not a Pokémon watch and not language-filtered.
+    # {
+    #     "id": "wogzelda",
+    #     "type": "wog",
+    #     "label": "WOG.ch (Zelda)",
+    #     "search_term": "zelda",
+    #     "name_filter": "zelda",   # drop fuzzy non-Zelda hits; case-insensitive
+    #     "order_by": "releasedate",
+    #     "max_rows": 96,
+    #     "max_pages": 5,
+    # },
     {
         "id": "wellplayed",
         "type": "shopify",
